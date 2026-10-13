@@ -1,0 +1,7 @@
+Comfortaa.ttf (Comfortaa variable font, wght axis)
+Copyright 2011 The Comfortaa Project Authors (https://github.com/alexeiva/comfortaa),
+with Reserved Font Name "Comfortaa". Included unmodified.
+
+Licensed under the SIL Open Font License, Version 1.1 - full text in OFL.txt next to this file.
+
+Used by eNegmatic as the fallback font for the splash screen and app icon.

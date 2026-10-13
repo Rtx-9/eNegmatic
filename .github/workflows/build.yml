@@ -1,0 +1,48 @@
+# Builds the Windows app on every version tag (v1.0.0, v1.1.0, ...) and attaches
+# eNegmatic-<tag>-windows.zip to a GitHub Release. Can also be run by hand from
+# the Actions tab (the zip is then kept as a workflow artifact).
+name: Build Windows app
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build
+        run: python -m PyInstaller --noconfirm --clean packaging/enegmatic.spec
+
+      - name: Zip
+        shell: pwsh
+        run: |
+          $name = if ($env:GITHUB_REF_TYPE -eq "tag") { "eNegmatic-$env:GITHUB_REF_NAME-windows.zip" } else { "eNegmatic-windows.zip" }
+          Compress-Archive -Path dist/eNegmatic -DestinationPath $name
+          "ZIP_NAME=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eNegmatic-windows
+          path: ${{ env.ZIP_NAME }}
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" "${{ env.ZIP_NAME }}" --title "eNegmatic ${{ github.ref_name }}" --generate-notes

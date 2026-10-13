@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller output
+build/
+dist/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# eNegmatic edit sidecars (if you test on images inside the repo)
+.enegmatic.json
+.negamatic.json
+.filmreverse.json
