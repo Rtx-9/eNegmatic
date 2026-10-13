@@ -5,10 +5,9 @@
 <h1 align="center">eNegmatic</h1>
 
 <p align="center"><i>made by Rtx9 &amp; Claude</i></p>
-
-A free, open-source desktop app that converts scanned or camera-digitised **colour and B&W film
-negatives** into positives. It reads Nikon **.NEF** (and most other raw formats via LibRaw), plus
-TIFF, PNG and JPEG scans.
+So yea "another vibe coded ai slop app", this one differs in the way that i actually have experience with it and gonna have my local photo store test it out in a real enviroment.
+This free, open-source "alternative to some others" desktop app converts scanned **colour and B&W film negatives** into positives. Tested on scans from a Nikon Z7
+<img src="https://alluvisuals.fi/film/1.jpg" width="200" alt="1"><img src="https://alluvisuals.fi/film/2.jpg" width="200" alt="2"><img src="https://alluvisuals.fi/film/3.jpg" width="200" alt="3"><img src="https://alluvisuals.fi/film/4.jpg" width="200" alt="4">
 
 ## Download (Windows)
 
