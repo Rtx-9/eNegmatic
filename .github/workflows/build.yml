@@ -1,12 +1,20 @@
-# Builds the Windows app on every version tag (v1.0.0, v1.1.0, ...) and attaches
-# eNegmatic-<tag>-windows.zip to a GitHub Release. Can also be run by hand from
-# the Actions tab (the zip is then kept as a workflow artifact).
+# Builds the Windows app and attaches eNegmatic-<tag>-windows.zip to a GitHub Release.
+#
+# Runs automatically when a version tag (v1.0.0, v1.1.0, ...) is pushed.
+# It can also be started by hand: Actions tab -> "Build Windows app" -> Run workflow,
+# optionally with a release tag to attach the zip to (the release is created if missing,
+# and an existing one just gets the zip added / replaced).
 name: Build Windows app
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Attach the zip to this release tag (e.g. v1.0.0). Leave empty to only build."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -29,12 +37,22 @@ jobs:
       - name: Build
         run: python -m PyInstaller --noconfirm --clean packaging/enegmatic.spec
 
+      - name: Self-test the built app
+        shell: pwsh
+        run: |
+          python -c "import numpy as np, cv2; y, x = np.mgrid[0:800, 0:1200]; img = np.full((800, 1200, 3), 0.002, np.float32); img[100:700, 100:1100] = np.stack([0.8 * 10 ** (-x[100:700, 100:1100] / 1200.0), 0.45 * 10 ** (-y[100:700, 100:1100] / 900.0), 0.25 * np.ones((600, 1000))], -1); cv2.imwrite('selftest_neg.tif', (img[..., ::-1] * 65535).astype(np.uint16))"
+          $p = Start-Process -FilePath dist/eNegmatic/eNegmatic.exe -ArgumentList "--selftest", "selftest_neg.tif", "selftest_out" -Wait -PassThru
+          Get-Content selftest_out/selftest.txt
+          if ($p.ExitCode -ne 0) { throw "self-test failed with exit code $($p.ExitCode)" }
+
       - name: Zip
         shell: pwsh
         run: |
-          $name = if ($env:GITHUB_REF_TYPE -eq "tag") { "eNegmatic-$env:GITHUB_REF_NAME-windows.zip" } else { "eNegmatic-windows.zip" }
+          $tag = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "${{ inputs.release_tag }}" }
+          $name = if ($tag) { "eNegmatic-$tag-windows.zip" } else { "eNegmatic-windows.zip" }
           Compress-Archive -Path dist/eNegmatic -DestinationPath $name
           "ZIP_NAME=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - uses: actions/upload-artifact@v4
         with:
@@ -42,7 +60,15 @@ jobs:
           path: ${{ env.ZIP_NAME }}
 
       - name: Publish release
-        if: github.ref_type == 'tag'
+        if: env.RELEASE_TAG != ''
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" "${{ env.ZIP_NAME }}" --title "eNegmatic ${{ github.ref_name }}" --generate-notes
+        run: |
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG $env:ZIP_NAME --clobber
+          } else {
+            gh release create $env:RELEASE_TAG $env:ZIP_NAME --title "eNegmatic $env:RELEASE_TAG" --generate-notes
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
