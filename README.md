@@ -6,7 +6,11 @@
 
 <p align="center"><i>made by Rtx9 &amp; Claude</i></p>
 So yea "another vibe coded ai slop app", this one differs in the way that i actually have experience with it and gonna have my local photo store test it out in a real enviroment.
-This free, open-source "alternative to some others" desktop app converts scanned **colour and B&W film negatives** into positives. Tested on scans from a Nikon Z7
+This free, open-source "alternative to some others" desktop app converts scanned **colour and B&W film negatives** into positives. Tested on scans from a Nikon Z7.
+
+
+Below are some scans and the converted images i got (screenshots so quality sucks)
+
 <img src="photos/example1.webp" width="48%" alt="Example 1"><img src="photos/example1-2.webp" width="48%" alt="Example 1">
 
 <img src="photos/example2.webp" width="48%" alt="Example 2"><img src="photos/example2-2.webp" width="48%" alt="Example 2">
