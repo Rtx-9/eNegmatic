@@ -75,7 +75,7 @@ GitHub Actions workflow in `.github/workflows/build.yml`. It builds the app and 
 
 ## Suggested workflow for a roll
 
-1. *Open Folder…* with the roll's NEFs. Frames auto-crop as previews build.
+1. *Open Folder…* with the roll's raws/jpegs (whatever the bullshit your scanner/camera spits out). Frames auto-crop as previews build.
 2. Pick *Colour negative* or *B&W negative*.
 3. Get one representative frame right. Pick the film base if the border is visible, then adjust.
 4. Optional: tick **Lock analysis (roll)** for consistent colour across frames.
