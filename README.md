@@ -7,14 +7,14 @@
 <p align="center"><i>made by Rtx9 &amp; Claude</i></p>
 So yea "another vibe coded ai slop app", this one differs in the way that i actually have experience with it and gonna have my local photo store test it out in a real enviroment.
 This free, open-source "alternative to some others" desktop app converts scanned **colour and B&W film negatives** into positives. Tested on scans from a Nikon Z7
-<img src="example1.png" width="48%" alt="Example 1">
-<img src="example1-2.png" width="48%" alt="Example 1">
-<img src="example2.png" width="48%" alt="Example 2">
-<img src="example2-2.png" width="48%" alt="Example 2">
-<img src="example3.png" width="48%" alt="Example 3">
-<img src="example3-2.png" width="48%" alt="Example 3">
-<img src="example4.png" width="48%" alt="Example 4">
-<img src="example4-2.png" width="48%" alt="Example 4">
+<img src="example1.png" width="48%" alt="Example 1"><img src="example1-2.png" width="48%" alt="Example 1">
+
+<img src="example2.png" width="48%" alt="Example 2"><img src="example2-2.png" width="48%" alt="Example 2">
+
+<img src="example3.png" width="48%" alt="Example 3"><img src="example3-2.png" width="48%" alt="Example 3">
+
+<img src="example4.png" width="48%" alt="Example 4"><img src="example4-2.png" width="48%" alt="Example 4">
+
 
 ## Download (Windows)
 
