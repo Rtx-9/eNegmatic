@@ -78,7 +78,7 @@ each build, and attaches all three downloads to the Release.
 - **Automatic inversion.** The orange mask is removed and channels balanced per frame (auto levels + auto white balance).
 - **Auto brightness.** Dim conversions (often caused by a few lamps or reflections setting the white point) are brightened like a gentle exposure push: highlights come up toward white without clipping, blacks stay black and night frames stay dark. Can be switched off per frame.
 - **B&W prints with snap.** Black-and-white film is printed onto a slightly harder virtual paper grade than colour, for deeper blacks and cleaner whites.
-- **Dust & hair removal (beta).** *Auto remove dust* finds dust specks and hairs on smooth areas (sky, walls, skin) and fills them in from their surroundings, grain included; on colour film it learns the scan's dust colour signature, so small coloured lights are left alone. The *healing brush* (H) paints out anything else; right-click undoes a spot or tells auto removal to keep a speck. Spots stay put when you rotate, flip or re-crop.
+- **Dust & hair removal (beta).** *Auto remove dust* (off whenever a frame is opened) finds dust specks and hairs on smooth areas (sky, walls, skin) and fills them in from their surroundings, grain included; on colour film it learns the scan's dust colour signature, so small coloured lights are left alone. The *healing brush* (H) paints out anything else; right-click undoes a spot or tells auto removal to keep a speck. Spots stay put when you rotate, flip or re-crop.
 - **Colour and B&W modes, detected automatically.** Each new frame is classified on load. B&W silver puts all three channels on one line in density space, while colour dyes spread out; the orange mask is a second check. Click either button to override. B&W is processed as a single channel and can be exported as true grayscale.
 - **Auto crop.** Finds the picture edges inside the rebate, the gaps between frames and the holder, and straightens tilt up to ±4°.
   It looks for straight, frame-length edges with frame border (clear film, holder or light) beyond them, so straight lines inside the picture, such as horizons, roof lines or a flat sky, aren't mistaken for the frame edge. Works for colour and B&W, 35 mm and medium format, and night scenes.
@@ -91,7 +91,8 @@ each build, and attaches all three downloads to the Release.
 - **Pickers.** *Film base* (click the clear film between frames for the most accurate colour) and *Pick neutral*
   (click something grey to set white balance).
 - **Adjustments.** Exposure, contrast, midtones, highlights, shadows, black and white points,
-  temperature, tint, saturation, sharpening. Double-click any slider to reset it.
+  temperature, tint, saturation, sharpening and noise reduction (removes digital scan noise, keeps film grain).
+  Double-click any slider to reset it. Every edit can be undone (Ctrl+Z) and redone (Ctrl+Shift+Z / Ctrl+Y).
 - **Zoom.** Click the image to toggle fit and 1:1, or use mouse wheel or touchpad pinch to zoom; drag or two-finger scroll to pan.
   Past the preview's resolution, the full-resolution raw is decoded in the background and only the visible area is rendered sharply.
 - **Live histogram** and a *Negative* toggle (**B**) for before/after.
@@ -128,6 +129,7 @@ On macOS use **Cmd** wherever it says Ctrl.
 | B | Show the original negative |
 | [ / ] | Rotate left / right |
 | Shift+F | Flip |
+| Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Ctrl+Shift+C / V | Copy / paste settings |
 | Ctrl+Alt+C | Choose what to copy |
 | Ctrl+R | Reset adjustments |

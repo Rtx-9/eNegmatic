@@ -37,7 +37,7 @@ SETTING_GROUPS = {
               "lock_analysis", "analysis")),
     "tone": ("Tone", ("exposure", "contrast", "gamma", "black", "white", "highlights", "shadows")),
     "color": ("Colour & white balance", ("wb_gains", "temperature", "tint", "saturation")),
-    "detail": ("Detail", ("sharpen",)),
+    "detail": ("Detail", ("sharpen", "denoise")),
     "dust": ("Auto dust removal (beta)", ("dust_auto", "dust_strength")),
     "orientation": ("Rotation & flip", ("rotation", "flip_h")),
     "crop": ("Crop & straighten", ("crop", "straighten", "crop_aspect")),
@@ -76,6 +76,7 @@ class Settings:
     highlights: float = 0.0
     shadows: float = 0.0
     sharpen: float = 0.0
+    denoise: float = 25.0               # 0..100 scan (digital) noise reduction
     # dust removal (see dust.py)
     dust_auto: bool = False             # automatic dust & hair removal
     dust_strength: float = 50.0         # 0..100 sensitivity
@@ -660,6 +661,8 @@ def render(neg_cropped: np.ndarray, s: Settings, a: dict, ref_size: int | None =
         if s.saturation:
             blk[...] = cv2.transform(blk, sat_m)
             np.clip(blk, 0.0, 1.0, out=blk)
+    if s.denoise > 0:
+        _denoise(out, s.denoise / 100.0, ref_size or max(out.shape[:2]), mono=nch == 1)
     if s.sharpen > 0:
         sigma = max(0.5, (ref_size or max(out.shape[:2])) / 4000.0)
         blur = cv2.GaussianBlur(out, (0, 0), sigma)
@@ -668,6 +671,44 @@ def render(neg_cropped: np.ndarray, s: Settings, a: dict, ref_size: int | None =
         del blur
         np.clip(out, 0.0, 1.0, out=out)
     return out
+
+
+DENOISE_SCALE = 1.2     # filter sigma per 4000 px of the picture's long edge
+
+
+def _denoise(img: np.ndarray, k: float, ref_size: int, mono: bool) -> None:
+    """Gentle reduction of digital scan noise, in place.
+
+    Colour speckle (chroma noise from the camera / scanner sensor, worst in the dense
+    parts of the negative) is blurred away; fine luminance noise is smoothed only where
+    it is a small deviation from its surroundings, so edges, detail and most film grain
+    survive. Sized relative to the picture, so preview, zoom and export agree; at preview
+    size the noise is already averaged out and nothing needs doing.
+    """
+    sigma = DENOISE_SCALE * ref_size / 4000.0 * (0.6 + 0.8 * k)
+    if sigma < 0.35:
+        return
+    thr = 0.012 + 0.03 * k                         # luminance deviation still treated as noise
+    chroma_amt = min(1.0, 1.6 * k)
+    pad = int(math.ceil(sigma * 2.5 * 3)) + 2
+    h = img.shape[0]
+    step = 768
+    for y0 in range(0, h, step):
+        a, b = max(0, y0 - pad), min(h, y0 + step + pad)
+        blk = img[a:b]
+        lum = blk @ LUMA if not mono else blk[..., 0].copy()
+        dev = lum - cv2.GaussianBlur(lum, (0, 0), sigma)
+        wgt = np.exp(-np.square(dev / thr)) * k
+        new_l = lum - wgt * dev
+        if mono:
+            res = np.repeat(new_l[..., None], 3, axis=2)
+        else:
+            chroma = blk - lum[..., None]
+            soft = cv2.GaussianBlur(chroma, (0, 0), sigma * 2.5)
+            res = new_l[..., None] + chroma + chroma_amt * (soft - chroma)
+        o0 = y0 - a
+        img[y0:min(h, y0 + step)] = res[o0:o0 + min(step, h - y0)]
+    np.clip(img, 0.0, 1.0, out=img)
 
 
 def neutral_wb_gains(sample_rgb, s: Settings, a: dict) -> list:

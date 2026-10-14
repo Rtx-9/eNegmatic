@@ -53,6 +53,9 @@ COLOR_SLIDERS = [
 ]
 DETAIL_SLIDERS = [
     ("sharpen", "Sharpen", 0, 100, 1, 0, "Unsharp-mask sharpening."),
+    ("denoise", "Noise reduction", 0, 100, 1, 0,
+     "Removes digital scan noise: colour speckle and fine sensor noise. Film grain stays.\n"
+     "Visible when zoomed in and in full-resolution exports."),
 ]
 FILM_SLIDERS = [
     ("clip_black", "Black clip %", 0.0, 2.0, 0.01, 2,
@@ -377,6 +380,10 @@ class MainWindow(QMainWindow):
 
         self._render_timer = QTimer(self, singleShot=True, interval=15)
         self._render_timer.timeout.connect(self._do_render)
+        self._history: dict[str, dict] = {}     # path -> {"base": state, "undo": [...], "redo": [...]}
+        self._hist_pending: set[str] = set()
+        self._hist_timer = QTimer(self, singleShot=True, interval=450)
+        self._hist_timer.timeout.connect(self._commit_history)
         self._settle_timer = QTimer(self, singleShot=True, interval=350)
         self._settle_timer.timeout.connect(lambda: self._schedule_render(0))
         self._save_timer = QTimer(self, singleShot=True, interval=1500)
@@ -452,6 +459,9 @@ class MainWindow(QMainWindow):
         self.act_reset = A("Reset Adjustments", self._reset_adjustments, "Ctrl+R",
                            "Reset tone / colour (keeps crop & rotation)")
         self.act_quit = A("Quit", self.close, "Ctrl+Q")
+        self.act_undo = A("Undo", self._undo, "Ctrl+Z", "Undo the last edit")
+        self.act_redo = A("Redo", self._redo, "Ctrl+Shift+Z", "Redo")
+        self.act_redo.setShortcuts([QKeySequence("Ctrl+Shift+Z"), QKeySequence("Ctrl+Y")])
         self.act_zoom_toggle = A("Zoom 1:1 / Fit", lambda: self.view.toggle_zoom(), "Z",
                                  "Toggle between fit and 100% (or click the image)")
         self.act_zoom_in = A("Zoom In", lambda: self.view.zoom_by(1.25), "Ctrl+=", "Zoom in")
@@ -462,7 +472,7 @@ class MainWindow(QMainWindow):
                   self.act_export, self.act_export_all, self.act_copy, self.act_copy_choose, self.act_paste,
                   self.act_paste_all, self.act_reset, self.act_open, self.act_add,
                   self.act_zoom_toggle, self.act_zoom_in, self.act_zoom_out, self.act_zoom_fit,
-                  self.act_folder, self.act_quit):
+                  self.act_folder, self.act_quit, self.act_undo, self.act_redo):
             self.addAction(a)
 
     def _build_menus(self):
@@ -478,6 +488,9 @@ class MainWindow(QMainWindow):
         m.addAction(self.act_quit)
 
         m = mb.addMenu("&Edit")
+        m.addAction(self.act_undo)
+        m.addAction(self.act_redo)
+        m.addSeparator()
         for a in (self.act_copy, self.act_copy_choose, self.act_paste, self.act_paste_all):
             m.addAction(a)
         m.addSeparator()
@@ -666,52 +679,6 @@ class MainWindow(QMainWindow):
 
         self.sections: dict[str, CollapsibleSection] = {}
 
-        # geometry (first: it's usually the first thing done to a frame)
-        sec = self._add_section(v, "geometry", "Crop & rotate")
-        grid = QGridLayout()
-        grid.setSpacing(6)
-        b_l = QPushButton("⟲ Left")
-        b_l.setToolTip("Rotate 90° left ([)")
-        b_l.clicked.connect(lambda: self._rotate(90))
-        b_r = QPushButton("Right ⟳")
-        b_r.setToolTip("Rotate 90° right (])")
-        b_r.clicked.connect(lambda: self._rotate(-90))
-        b_f = QPushButton("⇋ Flip")
-        b_f.setToolTip("Mirror horizontally (Shift+F)")
-        b_f.clicked.connect(self._flip)
-        for i, b in enumerate((b_l, b_r, b_f)):
-            grid.addWidget(b, 0, i)
-        b_auto = QPushButton("Auto crop")
-        b_auto.setToolTip("Detect the frame edge and its format, straighten and crop (A)")
-        b_auto.clicked.connect(self._auto_crop)
-        b_reset = QPushButton("Reset crop")
-        b_reset.setToolTip("Remove crop and straightening.")
-        b_reset.clicked.connect(self._reset_crop)
-        grid.addWidget(b_auto, 1, 0, 1, 3)
-        grid.addWidget(b_reset, 2, 0, 1, 3)
-        sec.addLayout(grid)
-        asp = QHBoxLayout()
-        asp.setSpacing(6)
-        self.btn_crop = QPushButton("Crop tool")
-        self.btn_crop.setCheckable(True)
-        self.btn_crop.setToolTip("Drag to crop, drag outside a corner to rotate (C)")
-        self.btn_crop.toggled.connect(self._toggle_crop)
-        self.aspect = QComboBox()
-        self.aspect.setToolTip("Crop format. Auto crop picks it from the frame (3:2 if unsure).")
-        for name, key in ASPECTS:
-            self.aspect.addItem(name, key)
-        self.aspect.currentIndexChanged.connect(self._on_aspect)
-        self.btn_swap = QPushButton("⇅")
-        self.btn_swap.setToolTip("Swap portrait / landscape")
-        self.btn_swap.setFixedWidth(36)
-        self.btn_swap.clicked.connect(self._swap_aspect)
-        asp.addWidget(self.btn_crop, 1)
-        asp.addWidget(self.aspect, 1)
-        asp.addWidget(self.btn_swap)
-        sec.addLayout(asp)
-        self._sliders(sec, GEOM_SLIDERS)
-
-
         # inversion
         sec = self._add_section(v, "inversion", "Inversion")
         self.cb_auto_wb = QCheckBox("Auto white balance")
@@ -794,7 +761,7 @@ class MainWindow(QMainWindow):
         self.btn_heal = QPushButton("Healing brush")
         self.btn_heal.setCheckable(True)
         self.btn_heal.setToolTip("Paint over dust, hairs or scratches (H).\nRight-click a spot to undo it, "
-                                 "Shift+wheel for brush size, Ctrl+Z undoes the last spot.")
+                                 "Shift+wheel for brush size, Ctrl+Z undoes.")
         self.btn_heal.toggled.connect(self._toggle_heal)
         b_clear = QPushButton("Clear spots")
         b_clear.setToolTip("Remove every healing-brush spot and kept speck on this frame.")
@@ -812,6 +779,50 @@ class MainWindow(QMainWindow):
         self.dust_info.setWordWrap(True)
         sec.addWidget(self.dust_info)
 
+        # geometry
+        sec = self._add_section(v, "geometry", "Crop & rotate")
+        grid = QGridLayout()
+        grid.setSpacing(6)
+        b_l = QPushButton("⟲ Left")
+        b_l.setToolTip("Rotate 90° left ([)")
+        b_l.clicked.connect(lambda: self._rotate(90))
+        b_r = QPushButton("Right ⟳")
+        b_r.setToolTip("Rotate 90° right (])")
+        b_r.clicked.connect(lambda: self._rotate(-90))
+        b_f = QPushButton("⇋ Flip")
+        b_f.setToolTip("Mirror horizontally (Shift+F)")
+        b_f.clicked.connect(self._flip)
+        for i, b in enumerate((b_l, b_r, b_f)):
+            grid.addWidget(b, 0, i)
+        b_auto = QPushButton("Auto crop")
+        b_auto.setToolTip("Detect the frame edge and its format, straighten and crop (A)")
+        b_auto.clicked.connect(self._auto_crop)
+        b_reset = QPushButton("Reset crop")
+        b_reset.setToolTip("Remove crop and straightening.")
+        b_reset.clicked.connect(self._reset_crop)
+        grid.addWidget(b_auto, 1, 0, 1, 3)
+        grid.addWidget(b_reset, 2, 0, 1, 3)
+        sec.addLayout(grid)
+        asp = QHBoxLayout()
+        asp.setSpacing(6)
+        self.btn_crop = QPushButton("Crop tool")
+        self.btn_crop.setCheckable(True)
+        self.btn_crop.setToolTip("Drag to crop, drag outside a corner to rotate (C)")
+        self.btn_crop.toggled.connect(self._toggle_crop)
+        self.aspect = QComboBox()
+        self.aspect.setToolTip("Crop format. Auto crop picks it from the frame (3:2 if unsure).")
+        for name, key in ASPECTS:
+            self.aspect.addItem(name, key)
+        self.aspect.currentIndexChanged.connect(self._on_aspect)
+        self.btn_swap = QPushButton("⇅")
+        self.btn_swap.setToolTip("Swap portrait / landscape")
+        self.btn_swap.setFixedWidth(36)
+        self.btn_swap.clicked.connect(self._swap_aspect)
+        asp.addWidget(self.btn_crop, 1)
+        asp.addWidget(self.aspect, 1)
+        asp.addWidget(self.btn_swap)
+        sec.addLayout(asp)
+        self._sliders(sec, GEOM_SLIDERS)
         v.addStretch(1)
 
         self.panel = panel
@@ -969,6 +980,7 @@ class MainWindow(QMainWindow):
                 sidecars[folder] = load_sidecar(folder) if self.save_sidecars else {}
             saved = sidecars[folder].get(Path(f).name)
             settings = Settings.from_dict(saved) if saved else Settings(film_type=self.default_film)
+            settings.dust_auto = False      # beta: only runs when ticked in this session
             item = ImageItem(f, settings, fresh=saved is None)
             li = QListWidgetItem(self._placeholder, item.name)
             li.setData(Qt.UserRole, f)
@@ -1054,6 +1066,8 @@ class MainWindow(QMainWindow):
                 self._apply_autocrop(s, data, angle, crop)
                 self._touch(item)
         item.fresh = False
+        self._hist_pending.discard(item.path)
+        self._history[item.path] = {"base": self._state(item), "undo": [], "redo": []}
         self._loaded += 1
         if self._loaded >= len(self.items):
             self._set_status(f"{len(self.items)} image(s) ready")
@@ -1083,7 +1097,10 @@ class MainWindow(QMainWindow):
         if item is self.current:
             return
         self._exit_tools()
+        self._commit_history()
         self.current = item
+        if item is not None:
+            self._hist(item)
         self._full = None                    # free the previous full-resolution image
         self._full_path = None
         self._tile_gen += 1
@@ -1188,7 +1205,64 @@ class MainWindow(QMainWindow):
         self.strip_header.setText(f"FILMSTRIP  ·  {len(self.items)}" if self.items else "FILMSTRIP")
 
     # ------------------------------------------------------------------ editing
-    def _touch(self, item: ImageItem):
+    # ------------------------------------------------------------------ undo / redo
+    @staticmethod
+    def _state(item: ImageItem) -> dict:
+        d = item.settings.to_dict()
+        d.pop("analysis", None)                  # derived data, not an edit
+        return d
+
+    def _hist(self, item: ImageItem) -> dict:
+        h = self._history.get(item.path)
+        if h is None:
+            h = self._history[item.path] = {"base": self._state(item), "undo": [], "redo": []}
+        return h
+
+    def _commit_history(self):
+        """Turn the changes since the last commit into one undo step per frame. Runs a
+        moment after editing stops, so a whole slider drag is a single step."""
+        self._hist_timer.stop()
+        for path in list(self._hist_pending):
+            item = self.by_path.get(path)
+            h = self._history.get(path)
+            if item is None or h is None:
+                continue
+            cur = self._state(item)
+            if cur != h["base"]:
+                h["undo"].append(h["base"])
+                del h["undo"][:-200]
+                h["base"], h["redo"] = cur, []
+        self._hist_pending.clear()
+
+    def _undo(self, redo=False):
+        item = self.current
+        if item is None:
+            return
+        self._commit_history()
+        h = self._hist(item)
+        src, dst = (h["redo"], h["undo"]) if redo else (h["undo"], h["redo"])
+        if not src:
+            self._set_status("Nothing to redo." if redo else "Nothing to undo.")
+            return
+        dst.append(h["base"])
+        h["base"] = src.pop()
+        analysis = item.settings.analysis
+        item.settings = Settings.from_dict({**h["base"], "analysis": analysis})
+        item.fresh = False
+        self._touch(item, record=False)
+        self._load_settings_to_ui()
+        self._update_heal_overlay()
+        self._schedule_render()
+        self._set_status("Redone." if redo else "Undone.")
+
+    def _redo(self):
+        self._undo(redo=True)
+
+    def _touch(self, item: ImageItem, record: bool = True):
+        if record:
+            self._hist(item)                     # make sure a starting point exists
+            self._hist_pending.add(item.path)
+            self._hist_timer.start()
         if self.save_sidecars:
             self._dirty_folders.add(item.folder)
             self._save_timer.start()
@@ -1578,16 +1652,6 @@ class MainWindow(QMainWindow):
         self._update_heal_overlay()
         self._schedule_render()
 
-    def _undo_spot(self):
-        if self.current and self.current.settings.dust_spots:
-            s = self.current.settings
-            s.dust_spots = list(s.dust_spots)[:-1]
-            self._touch(self.current)
-            self._update_dust_ui()
-            self._update_heal_overlay()
-            self._schedule_render()
-            self._set_status("Last brush spot undone.")
-
     def _clear_spots(self):
         if not self.current:
             return
@@ -1624,7 +1688,9 @@ class MainWindow(QMainWindow):
         if not self._clipboard or not items:
             return
         clip = self._clipboard
+        self._commit_history()
         for it in items:
+            self._hist(it)
             old = it.settings
             new = Settings.from_dict({**old.to_dict(), **clip}).copy()   # own copies of lists
             if "film_type" in clip:
@@ -1689,7 +1755,7 @@ class MainWindow(QMainWindow):
             return
         if not self._compare and analysis != item.settings.analysis:
             item.settings.analysis = analysis
-            self._touch(item)
+            self._touch(item, record=False)
         if self._render_full_size[0] == gen:
             self.view.full_size = self._render_full_size[1]
         if self._tile_sig != self._view_sig(item.settings, self._full_view()):
@@ -1788,11 +1854,13 @@ class MainWindow(QMainWindow):
         if counts[scope] == 0:
             scope = "all"
         dlg = ExportDialog(self, self.export_options, counts, scope)
-        if dlg.exec() != QDialog.Accepted:
-            return
+        accepted = dlg.exec() == QDialog.Accepted
         opts, scope = dlg.result_options()
-        self.export_options = opts
+        self.export_options = opts                      # kept even when cancelled / closed
         self.prefs.setValue("export", json.dumps(opts.to_dict()))
+        self.prefs.sync()
+        if not accepted:
+            return
         targets = {"current": [self.current] if self.current else [],
                    "selected": selected, "all": list(self.items)}[scope]
         targets = [t for t in targets if t is not None and not t.error]
@@ -1870,8 +1938,9 @@ class MainWindow(QMainWindow):
             "<b>Tools</b><br>C crop tool (drag outside a corner to rotate) · A auto crop · "
             "B show negative · [ / ] rotate · Shift+F flip · Esc leave tool · Enter apply crop<br>"
             "H healing brush: paint over dust · right-click undoes a spot (or keeps an auto-found "
-            "speck) · Shift+wheel brush size · Ctrl+Z undo last spot · middle-drag to pan<br><br>"
-            "<b>Settings</b><br>Ctrl+Shift+C copy · Ctrl+Shift+V paste to selected · Ctrl+R reset<br>"
+            "speck) · Shift+wheel brush size · middle-drag to pan<br><br>"
+            "<b>Settings</b><br>Ctrl+Z undo · Ctrl+Shift+Z / Ctrl+Y redo · Ctrl+Shift+C copy · "
+            "Ctrl+Shift+V paste to selected · Ctrl+R reset<br>"
             "Double-click any slider (or its label) to reset it.<br><br>"
             "<b>Tips</b><br>• For best colour, Pick the film base on the clear border between frames.<br>"
             "• For a consistent roll: get one frame right, tick <i>Lock analysis</i>, Copy, then "
@@ -1884,8 +1953,6 @@ class MainWindow(QMainWindow):
             self._exit_tools()
         elif k in (Qt.Key_Return, Qt.Key_Enter) and self._crop_mode:
             self._toggle_crop(False)
-        elif e.matches(QKeySequence.Undo):
-            self._undo_spot()
         elif k == Qt.Key_Left:
             self._step(-1)
         elif k == Qt.Key_Right:
