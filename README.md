@@ -78,14 +78,16 @@ each build, and attaches all three downloads to the Release.
 - **Automatic inversion.** The orange mask is removed and channels balanced per frame (auto levels + auto white balance).
 - **Auto brightness.** Dim conversions (often caused by a few lamps or reflections setting the white point) are brightened like a gentle exposure push: highlights come up toward white without clipping, blacks stay black and night frames stay dark. Can be switched off per frame.
 - **B&W prints with snap.** Black-and-white film is printed onto a slightly harder virtual paper grade than colour, for deeper blacks and cleaner whites.
-- **Dust & hair removal.** *Auto remove dust* finds dust specks and hairs on smooth areas (sky, walls, skin) and fills them in from their surroundings, grain included; on colour film it learns the scan's dust colour signature, so small coloured lights are left alone. The *healing brush* (H) paints out anything else; right-click undoes a spot or tells auto removal to keep a speck. Spots stay put when you rotate, flip or re-crop.
+- **Dust & hair removal (beta).** *Auto remove dust* finds dust specks and hairs on smooth areas (sky, walls, skin) and fills them in from their surroundings, grain included; on colour film it learns the scan's dust colour signature, so small coloured lights are left alone. The *healing brush* (H) paints out anything else; right-click undoes a spot or tells auto removal to keep a speck. Spots stay put when you rotate, flip or re-crop.
 - **Colour and B&W modes, detected automatically.** Each new frame is classified on load. B&W silver puts all three channels on one line in density space, while colour dyes spread out; the orange mask is a second check. Click either button to override. B&W is processed as a single channel and can be exported as true grayscale.
 - **Auto crop.** Finds the picture edges inside the rebate, the gaps between frames and the holder, and straightens tilt up to ±4°.
   It looks for straight, frame-length edges with frame border (clear film, holder or light) beyond them, so straight lines inside the picture, such as horizons, roof lines or a flat sky, aren't mistaken for the frame edge. Works for colour and B&W, 35 mm and medium format, and night scenes.
   Straightening traces the frame edges to a fraction of a pixel and balances opposite edges, so frames that aren't perfect rectangles (keystoning, film curl) come out as level as possible.
+  It also recognises the format (3:2, 4:3, 5:4, 1:1, 6×7, 16:9, 65:24; 3:2 when unsure) and crops to it exactly.
   New images are auto-cropped when they load (switch this off under *Options*).
-- **Manual crop tool.** Drag handles, rule-of-thirds overlay and aspect locks (3:2, 4:3, 5:4, 1:1, 6×7, 16:9).
-  Also: 90° rotate, flip, and fine straightening.
+- **Manual crop tool.** Drag handles, rule-of-thirds overlay and aspect locks; each frame remembers its format.
+  Drag just outside a corner to rotate. Straightening turns the picture about the crop centre and trims the crop
+  just enough to keep empty corners out. Also: 90° rotate and flip.
 - **Pickers.** *Film base* (click the clear film between frames for the most accurate colour) and *Pick neutral*
   (click something grey to set white balance).
 - **Adjustments.** Exposure, contrast, midtones, highlights, shadows, black and white points,
@@ -121,7 +123,7 @@ On macOS use **Cmd** wherever it says Ctrl.
 | Click / Z | Zoom 1:1 ↔ fit |
 | Wheel, pinch, Ctrl+= / Ctrl+- | Zoom in / out |
 | Ctrl+0 | Fit to window |
-| C | Crop tool (Enter applies, Esc cancels) |
+| C | Crop tool (Enter applies, Esc cancels; drag outside a corner to rotate) |
 | A | Auto crop |
 | B | Show the original negative |
 | [ / ] | Rotate left / right |

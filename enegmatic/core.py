@@ -38,11 +38,11 @@ SETTING_GROUPS = {
     "tone": ("Tone", ("exposure", "contrast", "gamma", "black", "white", "highlights", "shadows")),
     "color": ("Colour & white balance", ("wb_gains", "temperature", "tint", "saturation")),
     "detail": ("Detail", ("sharpen",)),
-    "dust": ("Auto dust removal", ("dust_auto", "dust_strength")),
+    "dust": ("Auto dust removal (beta)", ("dust_auto", "dust_strength")),
     "orientation": ("Rotation & flip", ("rotation", "flip_h")),
-    "crop": ("Crop & straighten", ("crop", "straighten")),
+    "crop": ("Crop & straighten", ("crop", "straighten", "crop_aspect")),
 }
-DEFAULT_COPY_GROUPS = ("film", "tone", "color", "detail", "dust", "orientation")
+DEFAULT_COPY_GROUPS = ("film", "tone", "color", "detail", "orientation")
 
 
 @dataclass
@@ -53,6 +53,7 @@ class Settings:
     flip_h: bool = False
     straighten: float = 0.0             # fine rotation, degrees (CCW positive)
     crop: list | None = None            # normalised [x0, y0, x1, y1] after rotation
+    crop_aspect: str = ""               # crop tool aspect, a key of ASPECTS ("" = free)
     # inversion / analysis
     clip_black: float = 0.05            # % of pixels auto levels may clip to black
     clip_white: float = 0.05            # % of pixels auto levels may clip to white
@@ -68,7 +69,7 @@ class Settings:
     saturation: float = 0.0
     # tone
     exposure: float = 0.0
-    contrast: float = 15.0
+    contrast: float = 30.0
     gamma: float = 1.0
     black: float = 0.0
     white: float = 0.0
@@ -241,6 +242,95 @@ def view_scale(src_shape, s: Settings, full_view: bool = False) -> float:
     """Long edge of the view divided by the long edge of the source (both in pixels)."""
     w, h, W, H, c, _ = _view_frame(src_shape, s, full_view)
     return max(W * (c[2] - c[0]), H * (c[3] - c[1])) / max(w, h)
+
+
+# Crop aspect ratios (long side / short side) offered by the crop tool, and auto
+# crop's guess of the format.
+ASPECTS = {"3:2": 3 / 2, "4:3": 4 / 3, "5:4": 5 / 4, "1:1": 1.0, "6×7": 7 / 6, "16:9": 16 / 9,
+           "65:24": 65 / 24}
+DEFAULT_ASPECT = "3:2"       # 35 mm, the usual case when the format isn't recognised
+ASPECT_TOLERANCE = 0.04      # how close (log ratio) a detected frame must be to a format
+
+
+def crop_px(crop, frame_wh):
+    W, H = frame_wh
+    x0, y0, x1, y1 = crop or (0.0, 0.0, 1.0, 1.0)
+    return x0 * W, y0 * H, x1 * W, y1 * H
+
+
+def detect_aspect(crop, frame_wh) -> str:
+    """Name of the standard format the crop is closest to, or DEFAULT_ASPECT."""
+    x0, y0, x1, y1 = crop_px(crop, frame_wh)
+    w, h = max(x1 - x0, 1e-6), max(y1 - y0, 1e-6)
+    r = max(w, h) / min(w, h)
+    name = min(ASPECTS, key=lambda k: abs(math.log(r / ASPECTS[k])))
+    return name if abs(math.log(r / ASPECTS[name])) <= ASPECT_TOLERANCE else DEFAULT_ASPECT
+
+
+def oriented_ratio(name: str, crop, frame_wh) -> float | None:
+    """Pixel w/h for an aspect name, portrait or landscape to match the crop."""
+    if name not in ASPECTS:
+        return None
+    x0, y0, x1, y1 = crop_px(crop, frame_wh)
+    r = ASPECTS[name]
+    return 1.0 / r if (y1 - y0) > (x1 - x0) else r
+
+
+def fit_aspect(crop, frame_wh, ratio: float) -> list:
+    """Largest crop with pixel aspect `ratio` (w/h) inside `crop`, same centre."""
+    W, H = frame_wh
+    x0, y0, x1, y1 = crop_px(crop, frame_wh)
+    w, h = x1 - x0, y1 - y0
+    if w / max(h, 1e-6) > ratio:
+        w = h * ratio
+    else:
+        h = w / ratio
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    return [float(round((cx - w / 2) / W, 6)), float(round((cy - h / 2) / H, 6)),
+            float(round((cx + w / 2) / W, 6)), float(round((cy + h / 2) / H, 6))]
+
+
+def straighten_crop(crop, frame_wh, old_angle: float, new_angle: float):
+    """Crop to use after changing the straighten angle from old to new.
+
+    The picture turns about the crop centre (the crop stays where it is on the subject
+    rather than the whole frame swinging round), and the crop shrinks, keeping its
+    aspect, just enough that no empty corners come into view.
+    """
+    W, H = frame_wh
+    if crop is None and abs(new_angle) < 1e-3:
+        return None
+    x0, y0, x1, y1 = crop_px(crop, frame_wh)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    hw, hh = (x1 - x0) / 2, (y1 - y0) / 2
+    m_old = cv2.getRotationMatrix2D((W / 2, H / 2), float(old_angle), 1.0)
+    m_new = cv2.getRotationMatrix2D((W / 2, H / 2), float(new_angle), 1.0)
+    px, py = cv2.invertAffineTransform(m_old) @ np.array([cx, cy, 1.0])
+    cx, cy = m_new @ np.array([px, py, 1.0])
+    inv = cv2.invertAffineTransform(m_new)
+    eps = 1e-6
+
+    def inside(x, y):
+        if not (-eps <= x <= W + eps and -eps <= y <= H + eps):
+            return False
+        u, v = inv @ np.array([x, y, 1.0])
+        return -eps <= u <= W + eps and -eps <= v <= H + eps
+
+    if not inside(cx, cy):                       # centre fell off the picture: pull it back
+        cx, cy = min(max(cx, 0.0), W), min(max(cy, 0.0), H)
+
+    def fits(f):
+        return all(inside(cx + sx * f * hw, cy + sy * f * hh) for sx in (-1, 1) for sy in (-1, 1))
+
+    f = 1.0
+    if not fits(1.0):
+        lo, hi = 0.0, 1.0
+        for _ in range(30):
+            mid = (lo + hi) / 2
+            lo, hi = (mid, hi) if fits(mid) else (lo, mid)
+        f = lo
+    hw, hh = hw * f, hh * f
+    return [float(round(v, 6)) for v in ((cx - hw) / W, (cy - hh) / H, (cx + hw) / W, (cy + hh) / H)]
 
 
 def resize_long_edge(img: np.ndarray, edge: int) -> np.ndarray:
@@ -487,7 +577,7 @@ def _curves(s: Settings, a: dict, nch: int) -> np.ndarray:
         _lift(v, k)
     v **= 1.0 / DISPLAY_GAMMA
 
-    b, w = s.black / 200.0, 1.0 - s.white / 200.0
+    b, w = -s.black / 200.0, 1.0 - s.white / 200.0     # Blacks + lifts, - deepens
     if b != 0.0 or w != 1.0:
         v -= b
         v /= max(w - b, 0.05)
@@ -504,10 +594,40 @@ def _curves(s: Settings, a: dict, nch: int) -> np.ndarray:
         k = k if k > 0 else 1.5 * k
         v += k * v * v * (1.0 - v)
     if s.contrast:
-        k = s.contrast / 100.0
-        v += k * (v * v * (3.0 - 2.0 * v) - v)
+        _contrast(v, s.contrast / 100.0)
     np.clip(v, 0.0, 1.0, out=v)
     return np.ascontiguousarray(v.T)
+
+
+CONTRAST_STEEPNESS = 12.0   # sigmoid steepness at contrast +100 (mid-tone slope ~3x)
+
+
+def _contrast(v: np.ndarray, k: float) -> np.ndarray:
+    """S-curve around mid-grey, in place. 0 and 1 stay fixed.
+
+    k > 0: a normalised logistic curve, mid-tone slope ~1 + a^2/48 (a = steepness).
+    k < 0: its exact inverse, which flattens the mid-tones by the same amount.
+    """
+    a = CONTRAST_STEEPNESS * abs(k)
+    if a < 1e-3:
+        return v
+    lo = 1.0 / (1.0 + math.exp(a / 2.0))
+    span = 1.0 - 2.0 * lo
+    np.clip(v, 0.0, 1.0, out=v)
+    if k > 0:
+        v -= 0.5
+        v *= -a
+        np.exp(v, out=v)
+        v += 1.0
+        np.reciprocal(v, out=v)
+        v -= lo
+        v /= span
+    else:
+        v *= span
+        v += lo
+        np.clip(v, 1e-7, 1.0 - 1e-7, out=v)
+        v[...] = 0.5 + np.log(v / (1.0 - v)) / a
+    return v
 
 
 def render(neg_cropped: np.ndarray, s: Settings, a: dict, ref_size: int | None = None) -> np.ndarray:

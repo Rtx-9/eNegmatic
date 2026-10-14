@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from collections import OrderedDict
 from pathlib import Path
 
@@ -22,14 +23,16 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 from . import __version__, dust
 from .autocrop import detect_frame
 from .batch import ExportOptions
-from .core import (DEFAULT_COPY_GROUPS, SETTING_GROUPS, Settings, detect_film_type, apply_crop, apply_geometry, histogram, negative_preview,
+from .core import ASPECTS as CROP_ASPECTS
+from .core import (DEFAULT_COPY_GROUPS, SETTING_GROUPS, Settings, detect_aspect, fit_aspect, oriented_ratio,
+                   straighten_crop, detect_film_type, apply_crop, apply_geometry, histogram, negative_preview,
                    neutral_wb_gains, orient, render, resolve_analysis, sample, src_to_view, straighten,
                    to_uint8, transform_crop, view_scale, view_to_src)
 from .export import ExportDialog, ExportRunner
 from .fileio import (RAW_EXTS, SUPPORTED_EXTS, collect_files, load_negative_u16, load_proxy, load_sidecar,
                      save_sidecar)
 from .theme import apply_theme, system_theme
-from .widgets import CollapsibleSection, Histogram, ImageView, ParamSlider, set_slider_colors
+from .widgets import CollapsibleSection, Histogram, ImageView, ParamSlider, glyph_icon, set_slider_colors
 
 THUMB_SIZE = QSize(176, 118)
 
@@ -40,7 +43,7 @@ TONE_SLIDERS = [
     ("gamma", "Midtones", 0.3, 3.0, 0.01, 2, "Gamma: >1 brightens, <1 darkens the mid-tones."),
     ("highlights", "Highlights", -100, 100, 1, 0, "Brighten or recover the bright tones."),
     ("shadows", "Shadows", -100, 100, 1, 0, "Lift or deepen the dark tones."),
-    ("black", "Blacks", -50, 50, 1, 0, "Black point. Positive = deeper blacks, negative = lifted / faded."),
+    ("black", "Blacks", -50, 50, 1, 0, "Black point. Positive = lifted / faded blacks, negative = deeper blacks."),
     ("white", "Whites", -50, 50, 1, 0, "White point. Positive = brighter whites (more clipping)."),
 ]
 COLOR_SLIDERS = [
@@ -62,11 +65,12 @@ DUST_SLIDERS = [
      "Higher also removes fainter and less certain specks; lower only obvious dust."),
 ]
 GEOM_SLIDERS = [
-    ("straighten", "Straighten", -10.0, 10.0, 0.05, 2, "Fine rotation in degrees."),
+    ("straighten", "Straighten", -45.0, 45.0, 0.05, 2,
+     "Fine rotation in degrees. The picture turns about the crop centre and the crop shrinks\n"
+     "just enough to keep empty corners out. In the crop tool, drag outside a corner to rotate."),
 ]
 
-ASPECTS = [("Free", None), ("3:2", 3 / 2), ("4:3", 4 / 3), ("5:4", 5 / 4), ("1:1", 1.0),
-           ("6×7", 7 / 6), ("16:9", 16 / 9)]
+ASPECTS = [("Free", "")] + [(k, k) for k in CROP_ASPECTS]   # combo label, Settings.crop_aspect
 
 
 def make_icon(pm: QPixmap) -> QIcon:
@@ -200,10 +204,11 @@ class FullLoadJob(QRunnable):
 
 
 class RenderJob(QRunnable):
-    def __init__(self, gen, path, proxy, settings, full_view, negative, signals, latest):
+    def __init__(self, gen, path, proxy, settings, full_view, negative, signals, latest, fast=False):
         super().__init__()
         self.gen, self.path, self.proxy, self.settings = gen, path, proxy, settings
         self.full_view, self.negative, self.signals, self.latest = full_view, negative, signals, latest
+        self.fast = fast            # interactive drag: keep the current analysis
 
     def run(self):
         if self.latest() != self.gen:
@@ -212,7 +217,11 @@ class RenderJob(QRunnable):
             s = self.settings
             full = self.proxy.geometry(s)
             cropped = apply_crop(full, s.crop)
-            a = resolve_analysis(cropped, s)
+            nch = 1 if s.film_type == "bw" else 3
+            if self.fast and s.analysis and len(s.analysis.get("dmin", ())) == nch:
+                a = s.analysis
+            else:
+                a = resolve_analysis(cropped, s)
             view = full if self.full_view else cropped
             img = negative_preview(view) if self.negative else render(view, s, a)
             img8 = to_uint8(img)
@@ -338,6 +347,10 @@ class MainWindow(QMainWindow):
         self.load_pool.setMaxThreadCount(max(1, min(3, (os.cpu_count() or 2) // 2)))
         self.render_pool = QThreadPool(self)
         self.render_pool.setMaxThreadCount(1)
+        # zoomed full-resolution tiles get their own worker, so the preview never waits
+        # behind them (straightening while zoomed used to lag badly)
+        self.tile_pool = QThreadPool(self)
+        self.tile_pool.setMaxThreadCount(1)
         self._load_jobs: dict[str, LoadJob] = {}
         self._gen = 0
         self._clipboard: dict | None = None
@@ -346,7 +359,8 @@ class MainWindow(QMainWindow):
         self._pick: str | None = None
         self._compare = False
         self._heal = False
-        self._aspect_ratio: float | None = None
+        self._fast_until = 0.0
+        self._rot_base = None
         self._exporter: ExportRunner | None = None
         self._loaded = 0
         self.colors = {}
@@ -363,6 +377,8 @@ class MainWindow(QMainWindow):
 
         self._render_timer = QTimer(self, singleShot=True, interval=15)
         self._render_timer.timeout.connect(self._do_render)
+        self._settle_timer = QTimer(self, singleShot=True, interval=350)
+        self._settle_timer.timeout.connect(lambda: self._schedule_render(0))
         self._save_timer = QTimer(self, singleShot=True, interval=1500)
         self._save_timer.timeout.connect(self._save_sidecars)
 
@@ -412,10 +428,10 @@ class MainWindow(QMainWindow):
         self.act_open = A("Open…", self._open_files, "Ctrl+O", "Open negatives (replaces the current list)")
         self.act_add = A("Add Files…", lambda: self._open_files(add=True), "Ctrl+Shift+A", "Add negatives to the list")
         self.act_folder = A("Open Folder…", self._open_folder, "Ctrl+Shift+O", "Open every negative in a folder")
-        self.act_prev = A("◀", lambda: self._step(-1), None, "Previous frame (←)")
-        self.act_next = A("▶", lambda: self._step(1), None, "Next frame (→)")
-        self.act_rot_l = A("⟲", lambda: self._rotate(90), "[", "Rotate 90° left")
-        self.act_rot_r = A("⟳", lambda: self._rotate(-90), "]", "Rotate 90° right")
+        self.act_prev = A("Previous Frame", lambda: self._step(-1), None, "Previous frame (←)")
+        self.act_next = A("Next Frame", lambda: self._step(1), None, "Next frame (→)")
+        self.act_rot_l = A("Rotate Left", lambda: self._rotate(90), "[", "Rotate 90° left ([)")
+        self.act_rot_r = A("Rotate Right", lambda: self._rotate(-90), "]", "Rotate 90° right (])")
         self.act_flip = A("⇋ Flip", self._flip, "Shift+F", "Mirror horizontally (emulsion side)")
         self.act_crop = A("Crop", self._toggle_crop, "C", "Crop tool – drag on the image", checkable=True)
         self.act_autocrop = A("Auto Crop", self._auto_crop, "A", "Detect the frame edge, straighten and crop")
@@ -526,7 +542,7 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self):
         tb = QToolBar("Main")
         tb.setMovable(False)
-        tb.setIconSize(QSize(16, 16))
+        tb.setIconSize(QSize(20, 20))
         tb.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.addToolBar(Qt.TopToolBarArea, tb)
         tb.addAction(self.act_open)
@@ -537,6 +553,8 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addAction(self.act_rot_l)
         tb.addAction(self.act_rot_r)
+        for a in (self.act_prev, self.act_next, self.act_rot_l, self.act_rot_r):
+            tb.widgetForAction(a).setToolButtonStyle(Qt.ToolButtonIconOnly)
         tb.addAction(self.act_flip)
         tb.addSeparator()
         tb.addAction(self.act_crop)
@@ -605,6 +623,7 @@ class MainWindow(QMainWindow):
         self.view.cropChanged.connect(self._on_crop_changed)
         self.view.picked.connect(self._on_picked)
         self.view.healPainted.connect(self._on_heal_painted)
+        self.view.rotateDragged.connect(self._on_rotate_drag)
         self.view.healErase.connect(self._on_heal_erase)
         self.view.brushStep.connect(lambda d: self._set_brush(self.brush_size * (1.2 ** d)))
         self.view.viewportChanged.connect(self._on_viewport)
@@ -646,6 +665,52 @@ class MainWindow(QMainWindow):
         v.addLayout(seg)
 
         self.sections: dict[str, CollapsibleSection] = {}
+
+        # geometry (first: it's usually the first thing done to a frame)
+        sec = self._add_section(v, "geometry", "Crop & rotate")
+        grid = QGridLayout()
+        grid.setSpacing(6)
+        b_l = QPushButton("⟲ Left")
+        b_l.setToolTip("Rotate 90° left ([)")
+        b_l.clicked.connect(lambda: self._rotate(90))
+        b_r = QPushButton("Right ⟳")
+        b_r.setToolTip("Rotate 90° right (])")
+        b_r.clicked.connect(lambda: self._rotate(-90))
+        b_f = QPushButton("⇋ Flip")
+        b_f.setToolTip("Mirror horizontally (Shift+F)")
+        b_f.clicked.connect(self._flip)
+        for i, b in enumerate((b_l, b_r, b_f)):
+            grid.addWidget(b, 0, i)
+        b_auto = QPushButton("Auto crop")
+        b_auto.setToolTip("Detect the frame edge and its format, straighten and crop (A)")
+        b_auto.clicked.connect(self._auto_crop)
+        b_reset = QPushButton("Reset crop")
+        b_reset.setToolTip("Remove crop and straightening.")
+        b_reset.clicked.connect(self._reset_crop)
+        grid.addWidget(b_auto, 1, 0, 1, 3)
+        grid.addWidget(b_reset, 2, 0, 1, 3)
+        sec.addLayout(grid)
+        asp = QHBoxLayout()
+        asp.setSpacing(6)
+        self.btn_crop = QPushButton("Crop tool")
+        self.btn_crop.setCheckable(True)
+        self.btn_crop.setToolTip("Drag to crop, drag outside a corner to rotate (C)")
+        self.btn_crop.toggled.connect(self._toggle_crop)
+        self.aspect = QComboBox()
+        self.aspect.setToolTip("Crop format. Auto crop picks it from the frame (3:2 if unsure).")
+        for name, key in ASPECTS:
+            self.aspect.addItem(name, key)
+        self.aspect.currentIndexChanged.connect(self._on_aspect)
+        self.btn_swap = QPushButton("⇅")
+        self.btn_swap.setToolTip("Swap portrait / landscape")
+        self.btn_swap.setFixedWidth(36)
+        self.btn_swap.clicked.connect(self._swap_aspect)
+        asp.addWidget(self.btn_crop, 1)
+        asp.addWidget(self.aspect, 1)
+        asp.addWidget(self.btn_swap)
+        sec.addLayout(asp)
+        self._sliders(sec, GEOM_SLIDERS)
+
 
         # inversion
         sec = self._add_section(v, "inversion", "Inversion")
@@ -716,8 +781,8 @@ class MainWindow(QMainWindow):
         self._sliders(sec, DETAIL_SLIDERS)
 
         # dust
-        sec = self._add_section(v, "dust", "Dust & hairs")
-        self.cb_dust = QCheckBox("Auto remove dust")
+        sec = self._add_section(v, "dust", "Dust & hairs (beta)")
+        self.cb_dust = QCheckBox("Auto remove dust (beta)")
         self.cb_dust.setToolTip(
             "Finds dust specks and hairs (white in the positive) on smooth areas such as sky\n"
             "and walls, and fills them in from their surroundings, grain included.\n"
@@ -747,43 +812,6 @@ class MainWindow(QMainWindow):
         self.dust_info.setWordWrap(True)
         sec.addWidget(self.dust_info)
 
-        # geometry
-        sec = self._add_section(v, "geometry", "Crop & rotate")
-        grid = QGridLayout()
-        grid.setSpacing(6)
-        b_l = QPushButton("⟲ Left")
-        b_l.clicked.connect(lambda: self._rotate(90))
-        b_r = QPushButton("Right ⟳")
-        b_r.clicked.connect(lambda: self._rotate(-90))
-        b_f = QPushButton("⇋ Flip")
-        b_f.clicked.connect(self._flip)
-        self.btn_crop = QPushButton("Crop tool")
-        self.btn_crop.setCheckable(True)
-        self.btn_crop.toggled.connect(self._toggle_crop)
-        b_auto = QPushButton("Auto crop")
-        b_auto.clicked.connect(self._auto_crop)
-        b_reset = QPushButton("Reset")
-        b_reset.setToolTip("Remove crop and straightening.")
-        b_reset.clicked.connect(self._reset_crop)
-        for i, b in enumerate((b_l, b_r, b_f, self.btn_crop, b_auto, b_reset)):
-            grid.addWidget(b, i // 3, i % 3)
-        sec.addLayout(grid)
-        self._sliders(sec, GEOM_SLIDERS)
-        asp = QHBoxLayout()
-        lab = QLabel("Aspect")
-        lab.setFixedWidth(84)
-        self.aspect = QComboBox()
-        for name, r in ASPECTS:
-            self.aspect.addItem(name, r)
-        self.aspect.currentIndexChanged.connect(self._on_aspect)
-        self.btn_swap = QPushButton("⇅")
-        self.btn_swap.setToolTip("Swap portrait / landscape")
-        self.btn_swap.setFixedWidth(36)
-        self.btn_swap.clicked.connect(self._swap_aspect)
-        asp.addWidget(lab)
-        asp.addWidget(self.aspect, 1)
-        asp.addWidget(self.btn_swap)
-        sec.addLayout(asp)
         v.addStretch(1)
 
         self.panel = panel
@@ -869,6 +897,9 @@ class MainWindow(QMainWindow):
         self.colors = apply_theme(QApplication.instance(), resolved)
         c = self.colors
         self.view.set_colors(c["viewer"], c["muted"], c.get("accent"))
+        for a, kind in ((self.act_prev, "prev"), (self.act_next, "next"),
+                        (self.act_rot_l, "rot_l"), (self.act_rot_r, "rot_r")):
+            a.setIcon(glyph_icon(kind, c["text"], 20))
         self.hist.set_colors(c["input"], c["border"])
         set_slider_colors(c)
         for sl in list(self.sliders.values()) + ([self.brush_slider] if hasattr(self, "brush_slider") else []):
@@ -1020,7 +1051,7 @@ class MainWindow(QMainWindow):
                 ac = detect_frame(orient(proxy, s.rotation, s.flip_h), self.autocrop_inset / 100.0)
             angle, crop = ac
             if crop:
-                s.straighten, s.crop = angle, crop
+                self._apply_autocrop(s, data, angle, crop)
                 self._touch(item)
         item.fresh = False
         self._loaded += 1
@@ -1108,6 +1139,9 @@ class MainWindow(QMainWindow):
         self.color_box.setVisible(s.film_type != "bw")
         self.cb_auto_wb.setEnabled(s.film_type != "bw")
         self.view.set_crop(s.crop)
+        self.aspect.blockSignals(True)
+        self.aspect.setCurrentIndex(max(0, self.aspect.findData(s.crop_aspect or "")))
+        self.aspect.blockSignals(False)
         self._update_frame_size()
         self._update_base_swatch()
         self._update_dust_ui()
@@ -1162,13 +1196,48 @@ class MainWindow(QMainWindow):
     def _set_field(self, name, value, reload_ui=False):
         if not self.current:
             return
-        setattr(self.current.settings, name, value)
         if name == "straighten":
             self.current.fresh = False
+            self._straighten_to(float(value))
+            return
+        setattr(self.current.settings, name, value)
         self._touch(self.current)
         if reload_ui:
             self._load_settings_to_ui()
         self._schedule_render()
+
+    def _straighten_to(self, angle, base=None):
+        """Set the straighten angle, turning the picture about the crop centre."""
+        item = self.current
+        s = item.settings
+        proxy = self.cache.get(item.path)
+        a0, c0 = base if base is not None else (s.straighten, s.crop)
+        if proxy is not None:
+            s.crop = straighten_crop(c0, proxy.frame_size(s), a0, angle)
+        s.straighten = angle
+        self.view.set_crop(s.crop)
+        self._touch(item)
+        self._interactive()
+        self._schedule_render()
+
+    def _interactive(self):
+        """Mark a geometry drag: renders reuse the analysis until it settles."""
+        self._fast_until = time.monotonic() + 0.3
+        self._settle_timer.start()
+
+    def _on_rotate_drag(self, delta, done):
+        if not self.current:
+            return
+        s = self.current.settings
+        if self._rot_base is None:
+            self._rot_base = (s.straighten, s.crop)
+        a0 = self._rot_base[0]
+        angle = round(min(max(a0 - delta, -45.0), 45.0), 2)    # clockwise drag turns it clockwise
+        self.current.fresh = False
+        self._straighten_to(angle, self._rot_base)
+        self.sliders["straighten"].setValue(angle)
+        if done:
+            self._rot_base = None
 
     def _set_film(self, kind):
         if self.current:
@@ -1255,12 +1324,20 @@ class MainWindow(QMainWindow):
             self._set_status("No frame border found — showing the full image.")
             s.straighten, s.crop = 0.0, None
         else:
-            s.straighten, s.crop = angle, crop
-            self._set_status(f"Frame detected (straightened {angle:+.2f}°).")
+            self._apply_autocrop(s, proxy, angle, crop)
+            self._set_status(f"Frame detected: {s.crop_aspect} (straightened {angle:+.2f}°).")
         self.current.fresh = False
         self._touch(self.current)
         self._load_settings_to_ui()
         self._schedule_render()
+
+    @staticmethod
+    def _apply_autocrop(s: Settings, proxy: ProxyData, angle, crop):
+        """Use a detected frame: recognise its format (3:2 if unsure) and crop to it exactly."""
+        wh = proxy.frame_size(s)
+        s.crop_aspect = detect_aspect(crop, wh)
+        s.straighten = angle
+        s.crop = fit_aspect(crop, wh, oriented_ratio(s.crop_aspect, crop, wh))
 
     def _reset_crop(self):
         if not self.current:
@@ -1281,27 +1358,33 @@ class MainWindow(QMainWindow):
         self._touch(self.current)
         self._schedule_render()
 
-    def _on_aspect(self, _=None):
-        r = self.aspect.currentData()
-        if r is None or not self.current:
-            self._aspect_ratio = None
-            self.view.set_aspect(None)
-            return
+    def _aspect_for_view(self) -> float | None:
+        """Pixel w/h the crop tool locks to: the frame's format, matching the crop's orientation."""
+        if not self.current:
+            return None
         s = self.current.settings
-        fw, fh = getattr(self.view, "frame_size", (3, 2))
-        x0, y0, x1, y1 = s.crop or [0, 0, 1, 1]
-        portrait = (x1 - x0) * fw < (y1 - y0) * fh
-        self._aspect_ratio = 1 / r if portrait else r
-        if not self._crop_mode:
+        proxy = self.cache.get(self.current.path)
+        if not s.crop_aspect or proxy is None:
+            return None
+        return oriented_ratio(s.crop_aspect, s.crop, proxy.frame_size(s))
+
+    def _on_aspect(self, _=None):
+        if not self.current:
+            return
+        self.current.settings.crop_aspect = self.aspect.currentData() or ""
+        self._touch(self.current)
+        if self._crop_mode:
+            self.view.set_aspect(self._aspect_for_view())
+        else:
             self._toggle_crop(True)
-        self.view.set_aspect(self._aspect_ratio)
 
     def _swap_aspect(self):
-        if self._aspect_ratio:
-            self._aspect_ratio = 1 / self._aspect_ratio
-            if not self._crop_mode:
-                self._toggle_crop(True)
-            self.view.set_aspect(self._aspect_ratio)
+        r = self._aspect_for_view()
+        if not r:
+            return
+        if not self._crop_mode:
+            self._toggle_crop(True)
+        self.view.set_aspect(1.0 / r)
 
     # ------------------------------------------------------------------ tools
     def _sync_tool_buttons(self):
@@ -1319,7 +1402,7 @@ class MainWindow(QMainWindow):
                                   else "Click something that should be neutral grey")
         elif self._crop_mode:
             self.view.set_mode(ImageView.CROP)
-            self.view.set_overlay("Drag to crop · Enter to apply")
+            self.view.set_overlay("Drag to crop · drag outside a corner to rotate · Enter to apply")
         elif self._heal:
             self.view.set_mode(ImageView.HEAL)
             self.view.set_overlay("Paint over dust · right-click undoes · Shift+wheel brush size")
@@ -1341,13 +1424,9 @@ class MainWindow(QMainWindow):
             self._pick = None
             self._compare = False
             self._heal = False
-        else:
-            self.aspect.blockSignals(True)
-            self.aspect.setCurrentIndex(0)
-            self.aspect.blockSignals(False)
-            self._aspect_ratio = None
-            self.view.set_aspect(None)
         self._apply_view_mode()
+        # the frame's format stays chosen between visits to the crop tool
+        self.view.set_aspect(self._aspect_for_view() if on else None)
 
     def _toggle_compare(self, on=None):
         self._compare = (not self._compare) if not isinstance(on, bool) else on
@@ -1377,10 +1456,6 @@ class MainWindow(QMainWindow):
     def _exit_tools(self):
         if self._crop_mode or self._pick or self._compare or self._heal:
             self._crop_mode, self._pick, self._compare, self._heal = False, None, False, False
-            self.aspect.blockSignals(True)
-            self.aspect.setCurrentIndex(0)
-            self.aspect.blockSignals(False)
-            self._aspect_ratio = None
             self.view.set_aspect(None)
             self._apply_view_mode()
 
@@ -1604,7 +1679,8 @@ class MainWindow(QMainWindow):
         full_view = self._full_view()
         self._render_full_size = (self._gen, self._display_full_size(proxy, item.settings, full_view))
         job = RenderJob(self._gen, item.path, proxy, item.settings.copy(), full_view,
-                        self._compare, self.signals, lambda: self._gen)
+                        self._compare, self.signals, lambda: self._gen,
+                        fast=time.monotonic() < self._fast_until)
         self.render_pool.start(job)
 
     def _on_rendered(self, gen, path, qimg, analysis, hist, mono):
@@ -1649,7 +1725,7 @@ class MainWindow(QMainWindow):
         job = TileJob(self._tile_gen, item.path, self._full, item.settings.copy(), full_view,
                       vp["rect"], vp["display_w"], self._view_sig(item.settings, full_view),
                       self.signals, lambda: self._tile_gen)
-        self.render_pool.start(job)
+        self.tile_pool.start(job)
 
     def _on_full_loaded(self, path, arr):
         if self._full_loading == path:
@@ -1791,8 +1867,8 @@ class MainWindow(QMainWindow):
     def _show_help(self):
         QMessageBox.information(self, "Shortcuts & tips", (
             "<b>Navigation</b><br>← / → previous / next frame (click the image first)<br><br>"
-            "<b>Tools</b><br>C crop tool · A auto crop · B show negative · [ / ] rotate · "
-            "Shift+F flip · Esc leave tool · Enter apply crop<br>"
+            "<b>Tools</b><br>C crop tool (drag outside a corner to rotate) · A auto crop · "
+            "B show negative · [ / ] rotate · Shift+F flip · Esc leave tool · Enter apply crop<br>"
             "H healing brush: paint over dust · right-click undoes a spot (or keeps an auto-found "
             "speck) · Shift+wheel brush size · Ctrl+Z undo last spot · middle-drag to pan<br><br>"
             "<b>Settings</b><br>Ctrl+Shift+C copy · Ctrl+Shift+V paste to selected · Ctrl+R reset<br>"
@@ -1840,6 +1916,8 @@ class MainWindow(QMainWindow):
         self.prefs.setValue("splitter", self.splitter.saveState())
         self.load_pool.clear()
         self.render_pool.clear()
+        self.tile_pool.clear()
         self.load_pool.waitForDone(3000)
         self.render_pool.waitForDone(3000)
+        self.tile_pool.waitForDone(3000)
         super().closeEvent(e)

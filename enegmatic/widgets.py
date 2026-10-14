@@ -6,10 +6,56 @@ import sys
 
 import numpy as np
 from PySide6.QtCore import QEvent, QLocale, QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QDoubleValidator, QPainter, QPainterPath, QPen, QPolygonF
+from PySide6.QtGui import (QColor, QCursor, QDoubleValidator, QIcon, QImage, QPainter, QPainterPath, QPen,
+                           QPixmap, QPolygonF)
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QPinchGesture, QPushButton,
                                QSizePolicy, QSlider,
                                QToolButton, QVBoxLayout, QWidget)
+
+
+def glyph_icon(kind: str, color: str, size: int = 18) -> QIcon:
+    """Toolbar icons drawn as vector shapes, so they are crisp and as large as needed
+    (the Unicode arrows they replace render as dots in many fonts).
+    kind: rot_l, rot_r, prev, next."""
+    return QIcon(glyph_pixmap(kind, color, size))
+
+
+def glyph_pixmap(kind: str, color: str, size: int = 18, outline: str | None = None) -> QPixmap:
+    dpr = 2.0
+    img = QImage(int(size * dpr), int(size * dpr), QImage.Format_ARGB32_Premultiplied)
+    img.setDevicePixelRatio(dpr)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing)
+    c = size / 2.0
+    if kind in ("rot_l", "rot_r"):
+        r = size * 0.32
+        start, span = -60.0, 285.0              # counter-clockwise arc, Qt degrees
+        end = math.radians(start + span)
+        ex, ey = c + r * math.cos(end), c - r * math.sin(end)
+        tx, ty = -math.sin(end), -math.cos(end)  # direction of travel at the end
+        nx, ny = -ty, tx
+        a, b = size * 0.2, size * 0.15
+        head = QPolygonF([QPointF(ex + tx * a * 0.55, ey + ty * a * 0.55),
+                          QPointF(ex - tx * a * 0.6 + nx * b, ey - ty * a * 0.6 + ny * b),
+                          QPointF(ex - tx * a * 0.6 - nx * b, ey - ty * a * 0.6 - ny * b)])
+        for col, wid in (((outline, 3.6),) if outline else ()) + ((color, 1.9),):
+            p.setPen(QPen(QColor(col), wid, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            p.drawArc(QRectF(c - r, c - r, 2 * r, 2 * r), int(start * 16), int(span * 16))
+            p.setBrush(QColor(col))
+            p.drawPolygon(head)
+    elif kind in ("prev", "next"):
+        w, h = size * 0.34, size * 0.5
+        pts = [QPointF(c + w / 2, c - h / 2), QPointF(c - w / 2, c), QPointF(c + w / 2, c + h / 2)]
+        p.setPen(QPen(QColor(color), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        p.drawPolyline(QPolygonF(pts))
+    p.end()
+    if kind in ("rot_r", "next"):
+        img = img.mirrored(True, False)
+        img.setDevicePixelRatio(dpr)
+    return QPixmap.fromImage(img)
 
 
 SLIDER_COLORS = {"groove": "#3a3e46", "fill": "#e8a33d", "handle": "#eceef1",
@@ -321,12 +367,14 @@ class ImageView(QWidget):
     cropChanged = Signal(list)
     picked = Signal(float, float)
     viewportChanged = Signal(object)
+    rotateDragged = Signal(float, bool)  # crop tool: degrees turned by dragging outside a corner, done
     healPainted = Signal(list)          # [(nx, ny), ...] along one brush stroke
     healErase = Signal(float, float)    # right-click: undo the spot / speck under the cursor
     brushStep = Signal(int)             # Shift+wheel: brush size up / down
 
     VIEW, CROP, PICK, HEAL = range(4)
     HANDLE = 9
+    ROTATE_ZONE = 34     # px beyond a crop corner where dragging rotates the picture
     MARGIN = 14
     MAX_PX = 4.0        # deepest zoom: screen pixels per full-resolution pixel
 
@@ -358,6 +406,7 @@ class ImageView(QWidget):
         self.bg = QColor("#0e0f11")
         self.fg = QColor("#959ba4")
         self.accent = QColor("#f0a43a")
+        self._rot_cursor = QCursor(glyph_pixmap("rot_r", "#ffffff", 22, outline="#000000"), 11, 11)
         self.brush = 0.01                  # healing brush radius, fraction of the image long edge
         self._spots = ([], [])             # (manual, auto) as (nx, ny, r) in view coordinates
         self._stroke = None                # points of the brush stroke being painted
@@ -594,8 +643,12 @@ class ImageView(QWidget):
         for name, pt in self._handles().items():
             if abs(pos.x() - pt.x()) <= self.HANDLE + 2 and abs(pos.y() - pt.y()) <= self.HANDLE + 2:
                 return name
-        if self._crop_rect().contains(pos):
+        c = self._crop_rect()
+        if c.contains(pos):
             return "move"
+        for pt in (c.topLeft(), c.topRight(), c.bottomLeft(), c.bottomRight()):
+            if math.hypot(pos.x() - pt.x(), pos.y() - pt.y()) <= self.ROTATE_ZONE:
+                return "rotate"
         return None
 
     # ---- painting
@@ -759,6 +812,11 @@ class ImageView(QWidget):
             return
         hit = self._hit(e.position())
         nx, ny = self._to_norm(e.position())
+        if hit == "rotate":
+            ctr = self._crop_rect().center()
+            a0 = math.atan2(e.position().y() - ctr.y(), e.position().x() - ctr.x())
+            self._drag = ("rotate", (ctr.x(), ctr.y(), a0), list(self._crop))
+            return
         if hit is None:
             self._drag = ("new", (nx, ny), list(self._crop))
         else:
@@ -798,7 +856,13 @@ class ImageView(QWidget):
                        "t": Qt.SizeVerCursor, "b": Qt.SizeVerCursor,
                        "l": Qt.SizeHorCursor, "r": Qt.SizeHorCursor,
                        "move": Qt.SizeAllCursor}
-            self.setCursor(cursors.get(hit, Qt.CrossCursor))
+            if hit == "rotate":
+                self.setCursor(self._rot_cursor)
+            else:
+                self.setCursor(cursors.get(hit, Qt.CrossCursor))
+            return
+        if self._drag[0] == "rotate":
+            self.rotateDragged.emit(self._rotation_delta(e.position()), False)
             return
         kind, (sx, sy), c0 = self._drag
         nx, ny = self._to_norm(e.position())
@@ -830,6 +894,12 @@ class ImageView(QWidget):
             self._crop = [x0, y0, x1, y1]
         self.update()
 
+    def _rotation_delta(self, pos) -> float:
+        """Degrees the pointer has turned (clockwise on screen) around the crop centre."""
+        cx, cy, a0 = self._drag[1]
+        d = math.degrees(math.atan2(pos.y() - cy, pos.x() - cx) - a0)
+        return (d + 180.0) % 360.0 - 180.0
+
     def _corner_rect(self, ax, ay, px, py):
         dx, dy = px - ax, py - ay
         sxn = 1 if dx >= 0 else -1
@@ -859,6 +929,11 @@ class ImageView(QWidget):
             stroke, self._stroke = self._stroke, None
             self.healPainted.emit(stroke)
             self.update()
+            return
+        if self._mode == self.CROP and self._drag is not None and self._drag[0] == "rotate":
+            delta = self._rotation_delta(e.position())
+            self._drag = None
+            self.rotateDragged.emit(delta, True)
             return
         if self._mode == self.CROP and self._drag is not None:
             c0 = self._drag[2]
