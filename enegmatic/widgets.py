@@ -1,6 +1,8 @@
 """Custom widgets: parameter slider, image viewer with crop / picker tools, histogram."""
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 from PySide6.QtCore import QEvent, QLocale, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QDoubleValidator, QPainter, QPainterPath, QPen, QPolygonF
@@ -345,7 +347,10 @@ class ImageView(QWidget):
         self._badge = ""
         self._vp_timer = QTimer(self, singleShot=True, interval=120)
         self._vp_timer.timeout.connect(self._emit_viewport)
-        self.grabGesture(Qt.PinchGesture)
+        if sys.platform != "darwin":
+            # macOS trackpads already send native zoom gestures (handled in event());
+            # grabbing the pinch gesture too would zoom twice as fast.
+            self.grabGesture(Qt.PinchGesture)
         self.bg = QColor("#0e0f11")
         self.fg = QColor("#959ba4")
 

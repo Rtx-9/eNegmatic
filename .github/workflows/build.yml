@@ -1,10 +1,13 @@
-# Builds the Windows app and attaches eNegmatic-<tag>-windows.zip to a GitHub Release.
+# Builds eNegmatic for Windows and macOS and attaches the downloads to a GitHub Release:
+#   eNegmatic-<tag>-windows.zip
+#   eNegmatic-<tag>-macos-arm64.dmg   (Apple Silicon Macs)
+#   eNegmatic-<tag>-macos-intel.dmg   (Intel Macs)
 #
 # Runs automatically when a version tag (v1.0.0, v1.1.0, ...) is pushed.
-# It can also be started by hand: Actions tab -> "Build Windows app" -> Run workflow,
-# optionally with a release tag to attach the zip to (the release is created if missing,
-# and an existing one just gets the zip added / replaced).
-name: Build Windows app
+# It can also be started by hand: Actions tab -> "Build app" -> Run workflow,
+# optionally with a release tag to attach the files to (the release is created if
+# missing; an existing one just gets the files added / replaced).
+name: Build app
 
 on:
   push:
@@ -12,16 +15,29 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Attach the zip to this release tag (e.g. v1.0.0). Leave empty to only build."
+        description: "Attach the downloads to this release tag (e.g. v1.0.0). Leave empty to only build."
         required: false
         default: ""
 
 permissions:
   contents: write
 
+env:
+  RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
+
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows
+          - os: macos-latest          # Apple Silicon
+            target: macos-arm64
+          - os: macos-15-intel        # Intel
+            target: macos-intel
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -37,38 +53,71 @@ jobs:
       - name: Build
         run: python -m PyInstaller --noconfirm --clean packaging/enegmatic.spec
 
-      - name: Self-test the built app
+      - name: Make a test negative
+        run: >
+          python -c "import numpy as np, cv2; y, x = np.mgrid[0:800, 0:1200];
+          img = np.full((800, 1200, 3), 0.002, np.float32);
+          img[100:700, 100:1100] = np.stack([0.8 * 10 ** (-x[100:700, 100:1100] / 1200.0),
+          0.45 * 10 ** (-y[100:700, 100:1100] / 900.0), 0.25 * np.ones((600, 1000))], -1);
+          cv2.imwrite('selftest_neg.tif', (img[..., ::-1] * 65535).astype(np.uint16))"
+
+      - name: Self-test the built app (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          python -c "import numpy as np, cv2; y, x = np.mgrid[0:800, 0:1200]; img = np.full((800, 1200, 3), 0.002, np.float32); img[100:700, 100:1100] = np.stack([0.8 * 10 ** (-x[100:700, 100:1100] / 1200.0), 0.45 * 10 ** (-y[100:700, 100:1100] / 900.0), 0.25 * np.ones((600, 1000))], -1); cv2.imwrite('selftest_neg.tif', (img[..., ::-1] * 65535).astype(np.uint16))"
           $p = Start-Process -FilePath dist/eNegmatic/eNegmatic.exe -ArgumentList "--selftest", "selftest_neg.tif", "selftest_out" -Wait -PassThru
           Get-Content selftest_out/selftest.txt
           if ($p.ExitCode -ne 0) { throw "self-test failed with exit code $($p.ExitCode)" }
 
-      - name: Zip
+      - name: Self-test the built app (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          dist/eNegmatic.app/Contents/MacOS/eNegmatic --selftest selftest_neg.tif selftest_out
+          cat selftest_out/selftest.txt
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $tag = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "${{ inputs.release_tag }}" }
-          $name = if ($tag) { "eNegmatic-$tag-windows.zip" } else { "eNegmatic-windows.zip" }
+          $suffix = if ($env:RELEASE_TAG) { "-$env:RELEASE_TAG" } else { "" }
+          $name = "eNegmatic$suffix-windows.zip"
           Compress-Archive -Path dist/eNegmatic -DestinationPath $name
-          "ZIP_NAME=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PACKAGE=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          name="eNegmatic${RELEASE_TAG:+-$RELEASE_TAG}-${{ matrix.target }}.dmg"
+          mkdir -p dmg
+          cp -R dist/eNegmatic.app dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname eNegmatic -srcfolder dmg -ov -format UDZO "$name"
+          echo "PACKAGE=$name" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: eNegmatic-windows
-          path: ${{ env.ZIP_NAME }}
+          name: eNegmatic-${{ matrix.target }}
+          path: ${{ env.PACKAGE }}
+
+  publish:
+    needs: build
+    if: always() && github.ref_type == 'tag' || always() && inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
 
       - name: Publish release
-        if: env.RELEASE_TAG != ''
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
-          gh release view $env:RELEASE_TAG *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:RELEASE_TAG $env:ZIP_NAME --clobber
-          } else {
-            gh release create $env:RELEASE_TAG $env:ZIP_NAME --title "eNegmatic $env:RELEASE_TAG" --generate-notes
-          }
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ls -l packages
+          if [ -z "$(ls -A packages)" ]; then echo "No packages were built"; exit 1; fi
+          if gh release view "$RELEASE_TAG" --repo "$REPO" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" packages/* --clobber --repo "$REPO"
+          else
+            gh release create "$RELEASE_TAG" packages/* --title "eNegmatic $RELEASE_TAG" --generate-notes --repo "$REPO"
+          fi

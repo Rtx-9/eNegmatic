@@ -1,5 +1,7 @@
 * text=auto
 *.bat text eol=crlf
+*.sh text eol=lf
 *.ttf binary
 *.ico binary
+*.icns binary
 *.png binary

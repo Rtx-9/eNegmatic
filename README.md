@@ -20,33 +20,58 @@ Below are some scans and the converted images i got (screenshots so quality suck
 <img src="photos/example4.webp" width="48%" alt="Example 4"><img src="photos/example4-2.webp" width="48%" alt="Example 4">
 <br><br>
 
-## Download (Windows)
+## Download
 
-Get the latest `eNegmatic-…-windows.zip` from the **[Releases](../../releases)** page, unzip it anywhere,
-and run `eNegmatic.exe`. No installation or Python needed.
+Get the latest version from the **[Releases](../../releases)** page. No installation of Python or anything else is needed.
+
+### Windows
+Download `eNegmatic-…-windows.zip`, unzip it anywhere and run `eNegmatic.exe`.
 
 The app isn't code-signed, so the first launch may show *"Windows protected your PC"*.
 Click **More info → Run anyway**.
 
+### macOS (12 Monterey or newer)
+Download the `.dmg` for your Mac:
+- `eNegmatic-…-macos-arm64.dmg` for Apple Silicon (M1, M2, M3, M4…)
+- `eNegmatic-…-macos-intel.dmg` for Intel Macs
+
+Not sure which you have? Open the Apple menu → *About This Mac* and look at *Chip* (Apple) or *Processor* (Intel).
+
+Open the `.dmg` and drag **eNegmatic** into **Applications**.
+
+The app isn't notarized by Apple, so macOS blocks it on first launch. To open it anyway:
+1. Double-click eNegmatic, then click **Done** (or **OK**) on the warning.
+2. Open **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to the eNegmatic message.
+3. Confirm with **Open** (and your password if asked).
+
+You only do this once. If macOS instead says the app *"is damaged"*, run this in Terminal once and open it again:
+```
+xattr -dr com.apple.quarantine /Applications/eNegmatic.app
+```
+
 ## Run from source
 
-Double-click **`run.bat`**. On first run it creates `.venv` and installs the dependencies.
+Windows: double-click **`run.bat`**. macOS / Linux: run **`./run.sh`**.
+On first run they create `.venv` and install the dependencies (Python 3.10 or newer).
 
-Or run it manually (Python 3.10 or newer, any OS):
+Or manually:
 
 ```
 python -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python -m pip install -r requirements.txt     (macOS / Linux: .venv/bin/python …)
 .venv\Scripts\python main.py            # optionally: main.py <files or folders>
 ```
 
-## Build the Windows app yourself
+## Build the app yourself
 
-Double-click **`build.bat`**. It installs PyInstaller and writes `dist\eNegmatic\eNegmatic.exe`
-plus `dist\eNegmatic-windows.zip`.
+- **Windows:** double-click **`build.bat`** → `dist\eNegmatic\eNegmatic.exe` and `dist\eNegmatic-windows.zip`.
+- **macOS:** run **`./build.sh`** → `dist/eNegmatic.app` and `dist/eNegmatic-macos.dmg`.
 
-Releases are built automatically: pushing a version tag (for example `v1.0.0`) runs the
-GitHub Actions workflow in `.github/workflows/build.yml`. It builds the app and attaches the zip to a new Release.
+Each platform has to be built on that platform.
+
+Releases are built automatically. Pushing a version tag (for example `v1.1.0`) runs the GitHub Actions
+workflow in `.github/workflows/build.yml`. It builds on Windows, Apple Silicon and Intel Macs, self-tests
+each build, and attaches all three downloads to the Release.
 
 ## Features
 
@@ -83,6 +108,8 @@ GitHub Actions workflow in `.github/workflows/build.yml`. It builds the app and 
 
 ## Shortcuts
 
+On macOS use **Cmd** wherever it says Ctrl.
+
 | Key | Action |
 |---|---|
 | ← / → | Previous / next frame (click the image first) |
@@ -118,8 +145,8 @@ The preview and the export share the same stored analysis, so exported files mat
 - `enegmatic/fileio.py` covers raw and bitmap loading, saving, and the sidecar files.
 - `enegmatic/batch.py` runs full-resolution export in worker processes.
 - `enegmatic/mainwindow.py`, `widgets.py`, `export.py` and `theme.py` make up the UI.
-- `packaging/` holds the PyInstaller spec and the Windows file-version info; `build.bat` runs it.
-- `tools/make_icon.py` regenerates `enegmatic/assets/enegmatic.ico` and the logo PNG.
+- `packaging/` holds the PyInstaller spec (Windows `.exe` and macOS `.app`) and the Windows file-version info; `build.bat` / `build.sh` run it.
+- `tools/make_icon.py` regenerates the Windows `.ico`, the macOS `.icns` and the logo PNG in `enegmatic/assets`.
 
 ## Notes
 

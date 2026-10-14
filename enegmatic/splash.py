@@ -5,6 +5,7 @@ may not be redistributed), otherwise in the bundled Comfortaa font.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, Qt
@@ -14,7 +15,9 @@ from PySide6.QtWidgets import QSplashScreen
 
 FONT_FILE = Path(__file__).parent / "assets" / "Comfortaa.ttf"
 ACCENT = "#e8a33d"
-SMALL_PT = 8.5      # credit line and loading message share one size
+# Pixel sizes, so the splash looks the same on Windows and macOS (point sizes differ).
+TITLE_PX = 61
+SMALL_PX = 11       # credit line and loading message share one size
 PREFERRED = "Century Gothic"
 # (title weight, small-text weight) per family; Comfortaa is drawn heavier to match
 WEIGHTS = {PREFERRED: (400, 400), "Comfortaa": (700, 500)}
@@ -43,33 +46,48 @@ def brand_font(family: str, size: float, weight: int = 700) -> QFont:
     return f
 
 
-def icon_pixmap(family: str, size: int) -> QPixmap:
-    """The app icon (amber tile with an "e") drawn natively at one size."""
+def icon_pixmap(family: str, size: int, mac: bool = False) -> QPixmap:
+    """The app icon (amber tile with an "e") drawn natively at one size.
+
+    mac=True follows Apple's icon grid: the tile is 824/1024 of the canvas,
+    centred, so it lines up with other apps in the Dock.
+    """
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+    inset = size * 100 / 1024 if mac else 0.0
+    tile = size - 2 * inset
+    rect = QRectF(inset, inset, tile, tile)
     path = QPainterPath()
-    path.addRoundedRect(QRectF(0, 0, size, size), size * 0.22, size * 0.22)
-    g = QLinearGradient(0, 0, size, size)
+    path.addRoundedRect(rect, tile * 0.22, tile * 0.22)
+    g = QLinearGradient(rect.topLeft(), rect.bottomRight())
     g.setColorAt(0, QColor("#f0b04e"))
     g.setColorAt(1, QColor("#c9771a"))
     p.fillPath(path, g)
     p.setPen(QColor("#17181a"))
     font = brand_font(family, 1, 700)
-    font.setPixelSize(max(6, round(size * 0.78)))
+    font.setPixelSize(max(6, round(tile * 0.78)))
     p.setFont(font)
     glyph = QFontMetricsF(font).tightBoundingRect("e")   # centre the glyph itself
-    p.drawText(QPointF((size - glyph.width()) / 2 - glyph.left(),
-                       (size - glyph.height()) / 2 - glyph.top()), "e")
+    p.drawText(QPointF(inset + (tile - glyph.width()) / 2 - glyph.left(),
+                       inset + (tile - glyph.height()) / 2 - glyph.top()), "e")
     p.end()
     return pm
 
 
 def app_icon(family: str) -> QIcon:
+    """Window / Dock icon: the pre-rendered icon file for this platform (identical to the
+    .exe / .app icon on every machine), or drawn live if the file is missing."""
+    name = "enegmatic.icns" if sys.platform == "darwin" else "enegmatic.ico"
+    path = FONT_FILE.parent / name
+    if path.exists():
+        icon = QIcon(str(path))
+        if not icon.isNull():
+            return icon
     icon = QIcon()
     for size in (16, 24, 32, 48, 64, 128, 256):
-        icon.addPixmap(icon_pixmap(family, size))
+        icon.addPixmap(icon_pixmap(family, size, mac=sys.platform == "darwin"))
     return icon
 
 
@@ -117,7 +135,8 @@ class Splash(QSplashScreen):
 
         # title: accent "e" + "Negmatic", centred as one word
         title_w, small_w = WEIGHTS.get(self.family, (700, 500))
-        title = brand_font(self.family, 46, title_w)
+        title = brand_font(self.family, 12, title_w)
+        title.setPixelSize(TITLE_PX)
         fm = QFontMetricsF(title)
         a, b = "e", "Negmatic"
         wa, wb = fm.horizontalAdvance(a), fm.horizontalAdvance(b)
@@ -135,7 +154,8 @@ class Splash(QSplashScreen):
         p.end()
 
     def _small_font(self) -> QFont:
-        f = brand_font(self.family, SMALL_PT, WEIGHTS.get(self.family, (700, 500))[1])
+        f = brand_font(self.family, 8, WEIGHTS.get(self.family, (700, 500))[1])
+        f.setPixelSize(SMALL_PX)
         f.setLetterSpacing(QFont.AbsoluteSpacing, 0.6)
         return f
 
