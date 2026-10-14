@@ -1,6 +1,7 @@
 """Custom widgets: parameter slider, image viewer with crop / picker tools, histogram."""
 from __future__ import annotations
 
+import math
 import sys
 
 import numpy as np
@@ -320,8 +321,11 @@ class ImageView(QWidget):
     cropChanged = Signal(list)
     picked = Signal(float, float)
     viewportChanged = Signal(object)
+    healPainted = Signal(list)          # [(nx, ny), ...] along one brush stroke
+    healErase = Signal(float, float)    # right-click: undo the spot / speck under the cursor
+    brushStep = Signal(int)             # Shift+wheel: brush size up / down
 
-    VIEW, CROP, PICK = range(3)
+    VIEW, CROP, PICK, HEAL = range(4)
     HANDLE = 9
     MARGIN = 14
     MAX_PX = 4.0        # deepest zoom: screen pixels per full-resolution pixel
@@ -353,10 +357,25 @@ class ImageView(QWidget):
             self.grabGesture(Qt.PinchGesture)
         self.bg = QColor("#0e0f11")
         self.fg = QColor("#959ba4")
+        self.accent = QColor("#f0a43a")
+        self.brush = 0.01                  # healing brush radius, fraction of the image long edge
+        self._spots = ([], [])             # (manual, auto) as (nx, ny, r) in view coordinates
+        self._stroke = None                # points of the brush stroke being painted
+        self._mouse = None
 
     # ---- state
-    def set_colors(self, bg: str, fg: str):
+    def set_colors(self, bg: str, fg: str, accent: str | None = None):
         self.bg, self.fg = QColor(bg), QColor(fg)
+        if accent:
+            self.accent = QColor(accent)
+        self.update()
+
+    def set_brush(self, r: float):
+        self.brush = max(1e-4, float(r))
+        self.update()
+
+    def set_spots(self, manual, auto):
+        self._spots = (list(manual), list(auto))
         self.update()
 
     def set_image(self, qimg, reset_view: bool = False):
@@ -456,7 +475,7 @@ class ImageView(QWidget):
         self._vp_timer.start()
 
     def _update_cursor(self):
-        if self._mode == self.PICK:
+        if self._mode in (self.PICK, self.HEAL):
             self.setCursor(Qt.CrossCursor)
         elif self._mode == self.VIEW:
             self.setCursor(Qt.OpenHandCursor if self.zoomed() else Qt.ArrowCursor)
@@ -480,6 +499,12 @@ class ImageView(QWidget):
         super().resizeEvent(e)
         self._vp_timer.start()
 
+    def leaveEvent(self, e):
+        self._mouse = None
+        if self._mode == self.HEAL:
+            self.update()
+        super().leaveEvent(e)
+
     def set_message(self, text: str):
         self._message = text
         self.update()
@@ -491,6 +516,7 @@ class ImageView(QWidget):
     def set_mode(self, mode: int):
         self._mode = mode
         self._drag = None
+        self._stroke = None
         self.setCursor(Qt.ArrowCursor)
         self._update_cursor()
         self.update()
@@ -609,6 +635,8 @@ class ImageView(QWidget):
             hs = self.HANDLE
             for pt in self._handles().values():
                 p.drawRect(QRectF(pt.x() - hs / 2, pt.y() - hs / 2, hs, hs))
+        if self._mode == self.HEAL:
+            self._paint_heal(p, r)
         if self._overlay:
             p.setRenderHint(QPainter.Antialiasing)
             fm = p.fontMetrics()
@@ -633,11 +661,42 @@ class ImageView(QWidget):
             p.setPen(QColor(255, 255, 255))
             p.drawText(box, Qt.AlignCenter, text)
 
+    def _paint_heal(self, p: QPainter, r: QRectF):
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(Qt.NoBrush)
+        L = max(r.width(), r.height())
+
+        def ring(nx, ny, rad, pen):
+            p.setPen(pen)
+            c = QPointF(r.left() + nx * r.width(), r.top() + ny * r.height())
+            p.drawEllipse(c, max(rad * L, 2.0), max(rad * L, 2.0))
+
+        auto_pen = QPen(QColor(255, 80, 80, 210), 1.2, Qt.DashLine)
+        for nx, ny, rad in self._spots[1]:
+            ring(nx, ny, rad * 1.6 + 3.0 / L, auto_pen)
+        man_pen = QPen(QColor(255, 255, 255, 170), 1.2)
+        for nx, ny, rad in self._spots[0]:
+            ring(nx, ny, rad, man_pen)
+        if self._stroke:
+            pen = QPen(self.accent, 1.5)
+            for nx, ny in self._stroke:
+                ring(nx, ny, self.brush, pen)
+        if self._mouse is not None and r.contains(self._mouse):
+            nx, ny = self._to_norm(self._mouse)
+            ring(nx, ny, self.brush, QPen(QColor(0, 0, 0, 160), 3))
+            ring(nx, ny, self.brush, QPen(QColor(255, 255, 255, 230), 1.3))
+
     # ---- zoom / pan input
     def wheelEvent(self, e):
         if self._img is None:
             return
         ad, pd = e.angleDelta(), e.pixelDelta()
+        if self._mode == self.HEAL and e.modifiers() & Qt.ShiftModifier:
+            d = ad.y() or ad.x()             # Shift turns the wheel horizontal on some systems
+            if d:
+                self.brushStep.emit(1 if d > 0 else -1)
+            e.accept()
+            return
         if e.modifiers() & Qt.ControlModifier:
             # touchpad pinch arrives as Ctrl+wheel on Windows
             steps = ad.y() / 120.0 if ad.y() else pd.y() / 60.0
@@ -681,6 +740,15 @@ class ImageView(QWidget):
         if pan_button:
             self._pan = (e.position(), e.button(), False)
             return
+        if self._mode == self.HEAL:
+            if not self._image_rect().contains(e.position()):
+                return
+            if e.button() == Qt.RightButton or (e.button() == Qt.LeftButton and e.modifiers() & Qt.AltModifier):
+                self.healErase.emit(*self._to_norm(e.position()))
+            elif e.button() == Qt.LeftButton:
+                self._stroke = [self._to_norm(e.position())]
+                self.update()
+            return
         if e.button() != Qt.LeftButton:
             return
         if self._mode == self.PICK:
@@ -708,6 +776,18 @@ class ImageView(QWidget):
                 self.pan_by(d.x(), d.y())
                 start = e.position()
             self._pan = (start, button, moved)
+            return
+        if self._mode == self.HEAL:
+            self._mouse = e.position()
+            if self._stroke is not None:
+                r = self._image_rect()
+                nx, ny = self._to_norm(e.position())
+                lx, ly = self._stroke[-1]
+                L = max(r.width(), r.height(), 1.0)
+                dist = math.hypot((nx - lx) * r.width(), (ny - ly) * r.height()) / L
+                if dist >= 0.35 * self.brush:
+                    self._stroke.append((nx, ny))
+            self.update()
             return
         if self._mode != self.CROP or self._img is None:
             return
@@ -774,6 +854,11 @@ class ImageView(QWidget):
             if not moved and button == Qt.LeftButton:
                 self.toggle_zoom(e.position())
             self._update_cursor()
+            return
+        if self._mode == self.HEAL and self._stroke is not None:
+            stroke, self._stroke = self._stroke, None
+            self.healPainted.emit(stroke)
+            self.update()
             return
         if self._mode == self.CROP and self._drag is not None:
             c0 = self._drag[2]

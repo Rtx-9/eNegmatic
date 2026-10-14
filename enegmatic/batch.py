@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .colorspace import DEFAULT as DEFAULT_SPACE
 from .colorspace import SPACES, convert, icc_profile
+from .dust import clean as clean_dust
 from .core import Settings, apply_crop, apply_geometry, render, resize_long_edge, resolve_analysis
 from .fileio import FORMATS, load_negative, save_image
 
@@ -53,6 +54,7 @@ def export_one(src: str, settings: dict, options: dict) -> tuple[str, str | None
         s = Settings.from_dict(settings)
         o = ExportOptions.from_dict(options)
         neg = load_negative(src, half_size=False)
+        neg, _ = clean_dust(neg, s)
         full = apply_geometry(neg, s, crop=False)
         del neg
         view = apply_crop(full, s.crop)

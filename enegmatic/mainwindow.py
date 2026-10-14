@@ -19,12 +19,12 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
                                QSplitter, QToolBar, QVBoxLayout, QWidget)
 
-from . import __version__
+from . import __version__, dust
 from .autocrop import detect_frame
 from .batch import ExportOptions
 from .core import (DEFAULT_COPY_GROUPS, SETTING_GROUPS, Settings, detect_film_type, apply_crop, apply_geometry, histogram, negative_preview,
-                   neutral_wb_gains, orient, render, resolve_analysis, sample, straighten,
-                   to_uint8, transform_crop)
+                   neutral_wb_gains, orient, render, resolve_analysis, sample, src_to_view, straighten,
+                   to_uint8, transform_crop, view_scale, view_to_src)
 from .export import ExportDialog, ExportRunner
 from .fileio import (RAW_EXTS, SUPPORTED_EXTS, collect_files, load_negative_u16, load_proxy, load_sidecar,
                      save_sidecar)
@@ -56,6 +56,10 @@ FILM_SLIDERS = [
      "How many pixels auto levels may clip to black. Higher = punchier, lower = safer."),
     ("clip_white", "White clip %", 0.0, 2.0, 0.01, 2,
      "How many pixels auto levels may clip to white."),
+]
+DUST_SLIDERS = [
+    ("dust_strength", "Sensitivity", 0, 100, 1, 0,
+     "Higher also removes fainter and less certain specks; lower only obvious dust."),
 ]
 GEOM_SLIDERS = [
     ("straighten", "Straighten", -10.0, 10.0, 0.05, 2, "Fine rotation in degrees."),
@@ -103,11 +107,14 @@ class ProxyData:
         self.full_shape = None      # (h, w) of the full-resolution image
         self._key = None
         self._geom = None
+        self.cleaner = dust.Cleaner()
+        self.dust_specks: list = []  # auto-detected specks of the last geometry() call
 
     def geometry(self, s: Settings):
-        key = (s.rotation % 360, bool(s.flip_h), round(float(s.straighten), 3))
+        key = (s.rotation % 360, bool(s.flip_h), round(float(s.straighten), 3), dust.dust_key(s))
         if key != self._key:
-            self._geom = straighten(orient(self.neg, s.rotation, s.flip_h), s.straighten)
+            neg, self.dust_specks = self.cleaner.get(self.neg, s)
+            self._geom = straighten(orient(neg, s.rotation, s.flip_h), s.straighten)
             self._key = key
         return self._geom
 
@@ -338,6 +345,7 @@ class MainWindow(QMainWindow):
         self._crop_mode = False
         self._pick: str | None = None
         self._compare = False
+        self._heal = False
         self._aspect_ratio: float | None = None
         self._exporter: ExportRunner | None = None
         self._loaded = 0
@@ -349,6 +357,7 @@ class MainWindow(QMainWindow):
         self.auto_film = self._pref_bool("auto_film", True)
         self.autocrop_inset = float(self.prefs.value("autocrop_inset", 1.0))
         self.save_sidecars = self._pref_bool("save_sidecars", True)
+        self.brush_size = float(self.prefs.value("brush_size", 0.8))   # % of the frame's long edge
         groups = self._pref_json("copy_groups")
         self.copy_groups = [g for g in groups if g in SETTING_GROUPS] if isinstance(groups, list) else list(DEFAULT_COPY_GROUPS)
 
@@ -411,6 +420,8 @@ class MainWindow(QMainWindow):
         self.act_crop = A("Crop", self._toggle_crop, "C", "Crop tool – drag on the image", checkable=True)
         self.act_autocrop = A("Auto Crop", self._auto_crop, "A", "Detect the frame edge, straighten and crop")
         self.act_compare = A("Negative", self._toggle_compare, "B", "Show the original negative", checkable=True)
+        self.act_heal = A("Heal", self._toggle_heal, "H",
+                          "Healing brush – paint over dust and hairs; right-click undoes", checkable=True)
         self.act_theme = A("☀", self._toggle_theme, "Ctrl+T", "Toggle light / dark theme")
         self.act_export = A("Export…", lambda: self._export("current"), "Ctrl+E", "Export the current image")
         self.act_export_all = A("Export All…", lambda: self._export("all"), "Ctrl+Shift+E", "Export every image")
@@ -431,7 +442,7 @@ class MainWindow(QMainWindow):
         self.act_zoom_out = A("Zoom Out", lambda: self.view.zoom_by(0.8), "Ctrl+-", "Zoom out")
         self.act_zoom_fit = A("Fit to Window", lambda: self.view.fit(), "Ctrl+0", "Fit the image to the window")
         for a in (self.act_prev, self.act_next, self.act_rot_l, self.act_rot_r, self.act_flip,
-                  self.act_crop, self.act_autocrop, self.act_compare, self.act_theme,
+                  self.act_crop, self.act_autocrop, self.act_compare, self.act_heal, self.act_theme,
                   self.act_export, self.act_export_all, self.act_copy, self.act_copy_choose, self.act_paste,
                   self.act_paste_all, self.act_reset, self.act_open, self.act_add,
                   self.act_zoom_toggle, self.act_zoom_in, self.act_zoom_out, self.act_zoom_fit,
@@ -459,6 +470,9 @@ class MainWindow(QMainWindow):
         for a in (self.act_rot_l, self.act_rot_r, self.act_flip, self.act_crop, self.act_autocrop):
             m.addAction(a)
         m.addAction("Reset Crop && Straighten", self._reset_crop)
+        m.addSeparator()
+        m.addAction(self.act_heal)
+        m.addAction("Clear Dust Spots", self._clear_spots)
 
         m = mb.addMenu("&View")
         m.addAction(self.act_compare)
@@ -527,6 +541,7 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addAction(self.act_crop)
         tb.addAction(self.act_autocrop)
+        tb.addAction(self.act_heal)
         tb.addAction(self.act_compare)
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -589,6 +604,9 @@ class MainWindow(QMainWindow):
         self.view = ImageView()
         self.view.cropChanged.connect(self._on_crop_changed)
         self.view.picked.connect(self._on_picked)
+        self.view.healPainted.connect(self._on_heal_painted)
+        self.view.healErase.connect(self._on_heal_erase)
+        self.view.brushStep.connect(lambda d: self._set_brush(self.brush_size * (1.2 ** d)))
         self.view.viewportChanged.connect(self._on_viewport)
 
         # adjustments panel
@@ -696,6 +714,38 @@ class MainWindow(QMainWindow):
         # detail
         sec = self._add_section(v, "detail", "Detail", expanded=False)
         self._sliders(sec, DETAIL_SLIDERS)
+
+        # dust
+        sec = self._add_section(v, "dust", "Dust & hairs")
+        self.cb_dust = QCheckBox("Auto remove dust")
+        self.cb_dust.setToolTip(
+            "Finds dust specks and hairs (white in the positive) on smooth areas such as sky\n"
+            "and walls, and fills them in from their surroundings, grain included.\n"
+            "Turn on the healing brush to see what it removes; right-click a speck to keep it.")
+        self.cb_dust.toggled.connect(lambda on: self._set_field("dust_auto", on))
+        sec.addWidget(self.cb_dust)
+        self._sliders(sec, DUST_SLIDERS)
+        heal_row = QHBoxLayout()
+        self.btn_heal = QPushButton("Healing brush")
+        self.btn_heal.setCheckable(True)
+        self.btn_heal.setToolTip("Paint over dust, hairs or scratches (H).\nRight-click a spot to undo it, "
+                                 "Shift+wheel for brush size, Ctrl+Z undoes the last spot.")
+        self.btn_heal.toggled.connect(self._toggle_heal)
+        b_clear = QPushButton("Clear spots")
+        b_clear.setToolTip("Remove every healing-brush spot and kept speck on this frame.")
+        b_clear.clicked.connect(self._clear_spots)
+        heal_row.addWidget(self.btn_heal, 1)
+        heal_row.addWidget(b_clear)
+        sec.addLayout(heal_row)
+        self.brush_slider = ParamSlider("Brush size", 0.2, 5.0, 0.1, 0.8, 1,
+                                        "Healing brush radius in % of the frame's long edge (Shift+wheel).")
+        self.brush_slider.setValue(self.brush_size)
+        self.brush_slider.valueChanged.connect(self._set_brush)
+        sec.addWidget(self.brush_slider)
+        self.dust_info = QLabel("")
+        self.dust_info.setObjectName("Muted")
+        self.dust_info.setWordWrap(True)
+        sec.addWidget(self.dust_info)
 
         # geometry
         sec = self._add_section(v, "geometry", "Crop & rotate")
@@ -818,10 +868,10 @@ class MainWindow(QMainWindow):
         resolved = system_theme() if self.theme_pref == "system" else self.theme_pref
         self.colors = apply_theme(QApplication.instance(), resolved)
         c = self.colors
-        self.view.set_colors(c["viewer"], c["muted"])
+        self.view.set_colors(c["viewer"], c["muted"], c.get("accent"))
         self.hist.set_colors(c["input"], c["border"])
         set_slider_colors(c)
-        for sl in self.sliders.values():
+        for sl in list(self.sliders.values()) + ([self.brush_slider] if hasattr(self, "brush_slider") else []):
             sl.slider.update()
         dark = c["name"] == "dark"
         self.act_theme.setText("☀" if dark else "☾")
@@ -1051,7 +1101,7 @@ class MainWindow(QMainWindow):
             w.setChecked(on)
             w.blockSignals(False)
         for cb, on in ((self.cb_auto_wb, s.auto_wb), (self.cb_auto_bright, s.auto_brightness),
-                       (self.cb_lock, s.lock_analysis)):
+                       (self.cb_lock, s.lock_analysis), (self.cb_dust, s.dust_auto)):
             cb.blockSignals(True)
             cb.setChecked(bool(on))
             cb.blockSignals(False)
@@ -1060,6 +1110,7 @@ class MainWindow(QMainWindow):
         self.view.set_crop(s.crop)
         self._update_frame_size()
         self._update_base_swatch()
+        self._update_dust_ui()
         kind = "B&W negative" if s.film_type == "bw" else "Colour negative"
         if self.current and self.current.film_detected:
             kind += " (auto-detected)"
@@ -1145,12 +1196,15 @@ class MainWindow(QMainWindow):
         if key == "geometry":
             self._reset_crop()
             return
-        group = {"inversion": "film", "tone": "tone", "color": "color", "detail": "detail"}[key]
+        group = {"inversion": "film", "tone": "tone", "color": "color", "detail": "detail",
+                 "dust": "dust"}[key]
         defaults = Settings()
         s = self.current.settings
         for f in SETTING_GROUPS[group][1]:
             if f != "film_type":
                 setattr(s, f, getattr(defaults, f))
+        if key == "dust":
+            s.dust_spots, s.dust_keep = [], []
         self._touch(self.current)
         self._load_settings_to_ui()
         self._schedule_render()
@@ -1160,7 +1214,8 @@ class MainWindow(QMainWindow):
             return
         old = self.current.settings
         self.current.settings = Settings(film_type=old.film_type, rotation=old.rotation,
-                                         flip_h=old.flip_h, straighten=old.straighten, crop=old.crop)
+                                         flip_h=old.flip_h, straighten=old.straighten, crop=old.crop,
+                                         dust_spots=list(old.dust_spots), dust_keep=list(old.dust_keep))
         self._touch(self.current)
         self._load_settings_to_ui()
         self._schedule_render()
@@ -1252,7 +1307,7 @@ class MainWindow(QMainWindow):
     def _sync_tool_buttons(self):
         for w, on in ((self.btn_crop, self._crop_mode), (self.act_crop, self._crop_mode),
                       (self.btn_pick_base, self._pick == "base"), (self.btn_pick_wb, self._pick == "wb"),
-                      (self.act_compare, self._compare)):
+                      (self.act_compare, self._compare), (self.btn_heal, self._heal), (self.act_heal, self._heal)):
             w.blockSignals(True)
             w.setChecked(on)
             w.blockSignals(False)
@@ -1265,12 +1320,16 @@ class MainWindow(QMainWindow):
         elif self._crop_mode:
             self.view.set_mode(ImageView.CROP)
             self.view.set_overlay("Drag to crop · Enter to apply")
+        elif self._heal:
+            self.view.set_mode(ImageView.HEAL)
+            self.view.set_overlay("Paint over dust · right-click undoes · Shift+wheel brush size")
         else:
             self.view.set_mode(ImageView.VIEW)
             self.view.set_overlay("Original negative" if self._compare else "")
         if self.current:
             self.view.set_crop(self.current.settings.crop)
         self._sync_tool_buttons()
+        self._update_heal_overlay()
         self._schedule_render(0)
 
     def _toggle_crop(self, on=None):
@@ -1281,6 +1340,7 @@ class MainWindow(QMainWindow):
         if on:
             self._pick = None
             self._compare = False
+            self._heal = False
         else:
             self.aspect.blockSignals(True)
             self.aspect.setCurrentIndex(0)
@@ -1294,6 +1354,14 @@ class MainWindow(QMainWindow):
         if self._compare:
             self._crop_mode = False
             self._pick = None
+            self._heal = False
+        self._apply_view_mode()
+
+    def _toggle_heal(self, on=None):
+        on = (not self._heal) if not isinstance(on, bool) else on
+        self._heal = bool(on and self.current)
+        if self._heal:
+            self._crop_mode, self._pick, self._compare = False, None, False
         self._apply_view_mode()
 
     def _start_pick(self, kind, on):
@@ -1301,13 +1369,14 @@ class MainWindow(QMainWindow):
             self._pick = kind
             self._crop_mode = False
             self._compare = False
+            self._heal = False
         elif self._pick == kind:
             self._pick = None
         self._apply_view_mode()
 
     def _exit_tools(self):
-        if self._crop_mode or self._pick or self._compare:
-            self._crop_mode, self._pick, self._compare = False, None, False
+        if self._crop_mode or self._pick or self._compare or self._heal:
+            self._crop_mode, self._pick, self._compare, self._heal = False, None, False, False
             self.aspect.blockSignals(True)
             self.aspect.setCurrentIndex(0)
             self.aspect.blockSignals(False)
@@ -1336,6 +1405,125 @@ class MainWindow(QMainWindow):
         self._touch(item)
         self._load_settings_to_ui()
         self._apply_view_mode()
+
+    # ------------------------------------------------------------------ dust / healing brush
+    def _set_brush(self, size):
+        self.brush_size = min(max(float(size), 0.2), 5.0)
+        self.prefs.setValue("brush_size", self.brush_size)
+        self.brush_slider.setValue(self.brush_size)
+        self._update_heal_overlay()
+
+    def _update_heal_overlay(self):
+        item = self.current
+        proxy = self.cache.get(item.path) if item else None
+        if not self._heal or proxy is None:
+            self.view.set_spots([], [])
+            return
+        s = item.settings
+        shape = proxy.neg.shape
+        k = view_scale(shape, s)
+        self.view.set_brush(self.brush_size / 100.0 / k)
+
+        def to_view(spots):
+            if not spots:
+                return []
+            pts = src_to_view([sp[:2] for sp in spots], shape, s)
+            return [(float(x), float(y), float(sp[2]) / k) for (x, y), sp in zip(pts, spots)]
+
+        auto = proxy.dust_specks if s.dust_auto else []
+        self.view.set_spots(to_view(s.dust_spots), to_view(auto))
+
+    def _update_dust_ui(self):
+        s = self.current.settings if self.current else Settings()
+        proxy = self.cache.get(self.current.path) if self.current else None
+        parts = []
+        if s.dust_auto and proxy is not None:
+            n = len(proxy.dust_specks)
+            parts.append(f"{n} speck{'s' if n != 1 else ''} found in the preview (full-resolution "
+                         "export also catches finer ones)")
+        if s.dust_spots:
+            parts.append(f"{len(s.dust_spots)} brush spot{'s' if len(s.dust_spots) != 1 else ''}")
+        if s.dust_keep:
+            parts.append(f"{len(s.dust_keep)} kept")
+        self.dust_info.setText(" · ".join(parts))
+        self.dust_info.setVisible(bool(parts))
+
+    def _on_heal_painted(self, points):
+        item = self.current
+        proxy = self.cache.get(item.path) if item else None
+        if proxy is None or not points:
+            return
+        s = item.settings
+        r = round(self.brush_size / 100.0, 5)
+        src = view_to_src(points, proxy.neg.shape, s)
+        new = [[round(float(x), 5), round(float(y), 5), r] for x, y in src if 0 <= x <= 1 and 0 <= y <= 1]
+        if not new:
+            return
+        s.dust_spots = list(s.dust_spots) + new
+        self._touch(item)
+        self._update_dust_ui()
+        self._update_heal_overlay()
+        self._schedule_render()
+
+    def _on_heal_erase(self, nx, ny):
+        item = self.current
+        proxy = self.cache.get(item.path) if item else None
+        if proxy is None:
+            return
+        s = item.settings
+        h, w = proxy.neg.shape[:2]
+        L = max(h, w)
+        (x, y), = view_to_src([(nx, ny)], proxy.neg.shape, s)
+
+        def dist(px, py):
+            return ((px - x) * w) ** 2 + ((py - y) * h) ** 2
+
+        tol = 4.0 / L
+        hits = [i for i, sp in enumerate(s.dust_spots) if dist(sp[0], sp[1]) ** 0.5 / L <= sp[2] + tol]
+        if hits:
+            i = min(hits, key=lambda j: dist(*s.dust_spots[j][:2]))
+            s.dust_spots = [sp for j, sp in enumerate(s.dust_spots) if j != i]
+            self._set_status("Brush spot removed.")
+        else:
+            kept = [i for i, p in enumerate(s.dust_keep) if dist(p[0], p[1]) ** 0.5 / L <= 0.006]
+            specks = [sp for sp in (proxy.dust_specks if s.dust_auto else [])
+                      if dist(sp[0], sp[1]) ** 0.5 / L <= sp[2] * 1.6 + 0.004]
+            if specks:
+                sp = min(specks, key=lambda q: dist(q[0], q[1]))
+                s.dust_keep = list(s.dust_keep) + [[round(sp[0], 5), round(sp[1], 5)]]
+                self._set_status("Speck kept: auto removal will leave it alone (right-click again to undo).")
+            elif kept:
+                s.dust_keep = [p for j, p in enumerate(s.dust_keep) if j not in kept]
+                self._set_status("Auto removal may remove that speck again.")
+            else:
+                self._set_status("Nothing to undo there.")
+                return
+        self._touch(item)
+        self._update_dust_ui()
+        self._update_heal_overlay()
+        self._schedule_render()
+
+    def _undo_spot(self):
+        if self.current and self.current.settings.dust_spots:
+            s = self.current.settings
+            s.dust_spots = list(s.dust_spots)[:-1]
+            self._touch(self.current)
+            self._update_dust_ui()
+            self._update_heal_overlay()
+            self._schedule_render()
+            self._set_status("Last brush spot undone.")
+
+    def _clear_spots(self):
+        if not self.current:
+            return
+        s = self.current.settings
+        if s.dust_spots or s.dust_keep:
+            s.dust_spots, s.dust_keep = [], []
+            self._touch(self.current)
+            self._update_dust_ui()
+            self._update_heal_overlay()
+            self._schedule_render()
+            self._set_status("Dust spots cleared.")
 
     # ------------------------------------------------------------------ copy / paste
     def _copy_settings(self, choose=False):
@@ -1431,7 +1619,9 @@ class MainWindow(QMainWindow):
         if self._tile_sig != self._view_sig(item.settings, self._full_view()):
             self.view.clear_tile()            # stale: settings or view changed
         self.view.set_image(qimg)
-        if not self._pick and not self._crop_mode:
+        self._update_heal_overlay()
+        self._update_dust_ui()
+        if not self._pick and not self._crop_mode and not self._heal:
             self.view.set_overlay("Original negative" if self._compare else "")
         self.hist.set_data(hist, mono)
         if not (self._compare or self._crop_mode or self._pick == "base"):
@@ -1602,7 +1792,9 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Shortcuts & tips", (
             "<b>Navigation</b><br>← / → previous / next frame (click the image first)<br><br>"
             "<b>Tools</b><br>C crop tool · A auto crop · B show negative · [ / ] rotate · "
-            "Shift+F flip · Esc leave tool · Enter apply crop<br><br>"
+            "Shift+F flip · Esc leave tool · Enter apply crop<br>"
+            "H healing brush: paint over dust · right-click undoes a spot (or keeps an auto-found "
+            "speck) · Shift+wheel brush size · Ctrl+Z undo last spot · middle-drag to pan<br><br>"
             "<b>Settings</b><br>Ctrl+Shift+C copy · Ctrl+Shift+V paste to selected · Ctrl+R reset<br>"
             "Double-click any slider (or its label) to reset it.<br><br>"
             "<b>Tips</b><br>• For best colour, Pick the film base on the clear border between frames.<br>"
@@ -1616,6 +1808,8 @@ class MainWindow(QMainWindow):
             self._exit_tools()
         elif k in (Qt.Key_Return, Qt.Key_Enter) and self._crop_mode:
             self._toggle_crop(False)
+        elif e.matches(QKeySequence.Undo):
+            self._undo_spot()
         elif k == Qt.Key_Left:
             self._step(-1)
         elif k == Qt.Key_Right:

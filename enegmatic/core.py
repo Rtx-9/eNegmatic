@@ -38,10 +38,11 @@ SETTING_GROUPS = {
     "tone": ("Tone", ("exposure", "contrast", "gamma", "black", "white", "highlights", "shadows")),
     "color": ("Colour & white balance", ("wb_gains", "temperature", "tint", "saturation")),
     "detail": ("Detail", ("sharpen",)),
+    "dust": ("Auto dust removal", ("dust_auto", "dust_strength")),
     "orientation": ("Rotation & flip", ("rotation", "flip_h")),
     "crop": ("Crop & straighten", ("crop", "straighten")),
 }
-DEFAULT_COPY_GROUPS = ("film", "tone", "color", "detail", "orientation")
+DEFAULT_COPY_GROUPS = ("film", "tone", "color", "detail", "dust", "orientation")
 
 
 @dataclass
@@ -74,6 +75,11 @@ class Settings:
     highlights: float = 0.0
     shadows: float = 0.0
     sharpen: float = 0.0
+    # dust removal (see dust.py)
+    dust_auto: bool = False             # automatic dust & hair removal
+    dust_strength: float = 50.0         # 0..100 sensitivity
+    dust_spots: list = field(default_factory=list)   # healing brush: [x, y, r] on the source
+    dust_keep: list = field(default_factory=list)    # [x, y]: auto specks the user kept
 
     def to_dict(self) -> dict:
         return json.loads(json.dumps(asdict(self)))
@@ -175,6 +181,66 @@ def transform_crop(crop, old_rot: int, old_flip: bool, new_rot: int, new_flip: b
     if new_flip:
         c = _crop_flip(c)
     return [round(v, 6) for v in c]
+
+
+# Source <-> view coordinates. "Source" is the original negative as loaded (normalised
+# 0..1); "view" is the oriented, straightened and (unless full_view) cropped picture, also
+# normalised. Dust spots are stored in source coordinates so they stay on the dust when
+# the frame is rotated, flipped, straightened or re-cropped.
+
+def _view_frame(src_shape, s: Settings, full_view: bool):
+    h, w = src_shape[:2]
+    W, H = (h, w) if (int(s.rotation) // 90) % 2 else (w, h)
+    c = [0.0, 0.0, 1.0, 1.0] if full_view or not s.crop else [min(max(float(v), 0.0), 1.0) for v in s.crop]
+    M = cv2.getRotationMatrix2D((W / 2.0, H / 2.0), float(s.straighten), 1.0)         if abs(float(s.straighten)) >= 1e-3 else None
+    return w, h, W, H, c, M
+
+
+def src_to_view(pts, src_shape, s: Settings, full_view: bool = False) -> np.ndarray:
+    p = np.asarray(pts, np.float64).reshape(-1, 2).copy()
+    w, h, W, H, c, M = _view_frame(src_shape, s, full_view)
+    x, y = p[:, 0] * w, p[:, 1] * h
+    cw, ch = w, h
+    for _ in range((int(s.rotation) // 90) % 4):        # np.rot90: counter-clockwise
+        x, y = y, cw - x
+        cw, ch = ch, cw
+    if s.flip_h:
+        x = W - x
+    if M is not None:
+        xi, yi = x - 0.5, y - 0.5
+        x = M[0, 0] * xi + M[0, 1] * yi + M[0, 2] + 0.5
+        y = M[1, 0] * xi + M[1, 1] * yi + M[1, 2] + 0.5
+    vx = (x / W - c[0]) / max(c[2] - c[0], 1e-9)
+    vy = (y / H - c[1]) / max(c[3] - c[1], 1e-9)
+    return np.stack([vx, vy], axis=1)
+
+
+def view_to_src(pts, src_shape, s: Settings, full_view: bool = False) -> np.ndarray:
+    p = np.asarray(pts, np.float64).reshape(-1, 2).copy()
+    w, h, W, H, c, M = _view_frame(src_shape, s, full_view)
+    x = (c[0] + p[:, 0] * (c[2] - c[0])) * W
+    y = (c[1] + p[:, 1] * (c[3] - c[1])) * H
+    if M is not None:
+        Mi = cv2.invertAffineTransform(M)
+        xi, yi = x - 0.5, y - 0.5
+        x = Mi[0, 0] * xi + Mi[0, 1] * yi + Mi[0, 2] + 0.5
+        y = Mi[1, 0] * xi + Mi[1, 1] * yi + Mi[1, 2] + 0.5
+    if s.flip_h:
+        x = W - x
+    k = (int(s.rotation) // 90) % 4
+    shapes = [(w, h)]
+    for _ in range(k):
+        shapes.append(shapes[-1][::-1])
+    for i in range(k, 0, -1):                          # undo each rotation step
+        pw, _ph = shapes[i - 1]
+        x, y = pw - y, x
+    return np.stack([x / w, y / h], axis=1)
+
+
+def view_scale(src_shape, s: Settings, full_view: bool = False) -> float:
+    """Long edge of the view divided by the long edge of the source (both in pixels)."""
+    w, h, W, H, c, _ = _view_frame(src_shape, s, full_view)
+    return max(W * (c[2] - c[0]), H * (c[3] - c[1])) / max(w, h)
 
 
 def resize_long_edge(img: np.ndarray, edge: int) -> np.ndarray:
