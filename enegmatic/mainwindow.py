@@ -636,8 +636,8 @@ class MainWindow(QMainWindow):
         self.cb_auto_wb.toggled.connect(lambda on: self._set_field("auto_wb", on))
         sec.addWidget(self.cb_auto_wb)
         self.cb_auto_bright = QCheckBox("Auto brightness")
-        self.cb_auto_bright.setToolTip("Lift midtones and shadows of dark-looking conversions to a normal\n"
-                                       "brightness. Night and low-key frames keep their darkness.")
+        self.cb_auto_bright.setToolTip("Brighten dim conversions like a gentle exposure push: highlights come\n"
+                                       "up toward white, blacks stay black and night frames stay dark.")
         self.cb_auto_bright.toggled.connect(lambda on: self._set_field("auto_brightness", on))
         sec.addWidget(self.cb_auto_bright)
         lock_row = QHBoxLayout()

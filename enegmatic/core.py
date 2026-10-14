@@ -24,7 +24,7 @@ import numpy as np
 EPS = 1e-5
 DISPLAY_GAMMA = 2.2
 PRINT_STOPS = 5.5
-_PRINT_SCALE = 2.0 ** PRINT_STOPS - 1.0
+PRINT_STOPS_BW = 6.5   # B&W prints like a harder paper grade: deeper blacks, more snap
 LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
 # Fields that change which pixels / statistics the auto analysis looks at.
@@ -268,7 +268,7 @@ def analyze(neg: np.ndarray, s: Settings) -> dict:
             # under the current balance and equalise their channel medians.
             # Much less fooled by big coloured areas (sky, foliage) than grey-world.
             for _ in range(4):
-                tb = t ** wb_gamma
+                tb = _balance(t.copy(), wb_gamma)
                 chroma = tb.max(axis=1) - tb.min(axis=1)
                 sel = chroma < 0.08
                 if sel.sum() < max(300, 0.03 * len(t)):
@@ -281,34 +281,46 @@ def analyze(neg: np.ndarray, s: Settings) -> dict:
         "dmin": [float(v) for v in dmin],
         "dmax": [float(v) for v in dmax],
         "wb_gamma": [float(v) for v in wb_gamma],
-        "auto_gamma": _auto_gamma(d, dmin, dmax, wb_gamma) if s.auto_brightness else 1.0,
+        "auto_gain": _auto_gain(d, dmin, dmax, wb_gamma) if s.auto_brightness else 1.0,
         "key": analysis_key(s),
     }
 
 
-BRIGHTNESS_TARGET = 0.42   # median display brightness of a normally exposed photo
+AUTO_WHITE = 0.79      # linear level (display ~0.90) the brightest real content is lifted to
+AUTO_MID_MAX = 0.22    # linear level (display ~0.50) the median is never lifted above
+AUTO_GAIN_MAX = (2.5, 4.0)   # ~1.3 stops for night / low-key frames, 2 stops otherwise
 
 
-def _auto_gamma(d: np.ndarray, dmin, dmax, wb_gamma) -> float:
-    """Midtone lift that brings the conversion's median brightness toward a normal photo.
+def _auto_gain(d: np.ndarray, dmin, dmax, wb_gamma) -> float:
+    """Exposure lift for conversions that came out dim.
 
-    Applied as a gamma on the display values, so black and white points (and therefore
-    clipping) stay where auto levels put them; only midtones and shadows move. Frames that
-    are mostly genuinely dark (night, low-key) keep their darkness, and bright frames are
-    never darkened.
+    The white point of auto levels often sits on a few specular pixels (lamps, reflections),
+    which leaves the actual picture dull and grey. This picks a gain that brings the
+    brightest real content (99th percentile) up toward white, without pushing the median
+    past a normal brightness. Mostly dark (night, low-key) frames get a smaller lift, so they
+    stay dark. It is applied by _lift: a plain gain near black (blacks stay
+    black, no colour shifts, night stays night) that rolls off so nothing clips.
     """
     t = np.clip((d - dmin) / (dmax - dmin), 0.0, 1.5).astype(np.float32)
-    t **= np.asarray(wb_gamma, np.float32)
-    v = np.maximum(_t_to_linear(t), 0.0) ** (1.0 / DISPLAY_GAMMA)
-    y = v @ LUMA if v.shape[1] == 3 else v[:, 0]
-    med, p75 = (float(x) for x in np.percentile(y, [50, 75]))
-    if med >= BRIGHTNESS_TARGET:
-        return 1.0
-    g = np.log(max(med, 0.02)) / np.log(BRIGHTNESS_TARGET)
-    # Low-key protection: when three quarters of the frame is near black (night scenes,
-    # dark backgrounds) the darkness is the picture, so fade the lift out.
-    strength = 0.8 * float(np.clip((p75 - 0.12) / 0.12, 0.0, 1.0))
-    return float(min(1.0 + (g - 1.0) * strength, 1.8))
+    lin = np.maximum(_t_to_linear(_balance(t, wb_gamma), _stops(t.shape[1])), 0.0)
+    y = lin @ LUMA if lin.shape[1] == 3 else lin[:, 0]
+    med, hi = (float(x) for x in np.percentile(y, [50, 99]))
+
+    def gain_for(x, target):          # k such that _lift(x, k) == target
+        x = min(max(x, 1e-4), 0.999)
+        return target * (1.0 - x) / (x * (1.0 - target))
+
+    lo_key, normal = AUTO_GAIN_MAX
+    cap = float(np.interp(med ** (1.0 / DISPLAY_GAMMA), (0.15, 0.30), (lo_key, normal)))
+    k = min(gain_for(hi, AUTO_WHITE), gain_for(med, AUTO_MID_MAX), cap)
+    return float(max(k, 1.0))
+
+
+def _lift(v: np.ndarray, k: float) -> np.ndarray:
+    """Gain k on linear light with a highlight roll-off: 0 -> 0, 1 -> 1, slope k at black."""
+    v *= k
+    v /= 1.0 + (k - 1.0) / k * v
+    return v
 
 
 def analysis_valid(a: dict | None, s: Settings) -> bool:
@@ -317,6 +329,8 @@ def analysis_valid(a: dict | None, s: Settings) -> bool:
     nch = 1 if s.film_type == "bw" else 3
     if len(a["dmin"]) != nch:
         return False
+    if s.auto_brightness and "auto_gain" not in a and not s.lock_analysis:
+        return False                    # saved by an older version (1.1.1 used auto_gamma)
     return bool(s.lock_analysis or a.get("key") == analysis_key(s))
 
 
@@ -345,22 +359,49 @@ def _to_t(block: np.ndarray, a: dict) -> np.ndarray:
     t -= dmin
     t /= (dmax - dmin)
     np.clip(t, 0.0, 1.5, out=t)
-    if np.any(np.abs(wg - 1.0) > 1e-4):
-        t **= wg
+    return _balance(t, wg)
+
+
+WB_TOE = 0.2
+
+
+def _balance(t: np.ndarray, wb_gamma) -> np.ndarray:
+    """Per-channel grey balance t ** g, eased into a neutral toe below WB_TOE.
+
+    A pure power has infinite (g < 1) or zero (g > 1) slope at black, which tints the
+    deepest shadows. Below WB_TOE a cubic takes over that starts at slope 1 for every
+    channel (neutral blacks) and meets the power curve in value and slope.
+    """
+    g = np.asarray(wb_gamma, np.float32)
+    if not np.any(np.abs(g - 1.0) > 1e-4):
+        return t
+    t0 = np.float32(WB_TOE)
+    e = t0 ** g - t0                         # value and slope offsets at the joint
+    f = g * t0 ** (g - 1.0) - 1.0
+    a = (3.0 * e - f * t0) / t0 ** 2
+    b = (f * t0 - 2.0 * e) / t0 ** 3
+    lo = t * (1.0 + t * (a + t * b))
+    toe = t < t0
+    t **= g
+    np.copyto(t, np.maximum(lo, 0.0), where=toe)
     return t
 
 
-def _t_to_linear(t: np.ndarray) -> np.ndarray:
+def _stops(nch: int) -> float:
+    return PRINT_STOPS_BW if nch == 1 else PRINT_STOPS
+
+
+def _t_to_linear(t: np.ndarray, stops: float = PRINT_STOPS) -> np.ndarray:
     """Normalised density -> scene-linear light, like printing onto paper.
 
     Density is proportional to log exposure, so exposure is exponential in t.
     PRINT_STOPS is the scene range spanned between the black and white points;
     it puts an 18% grey card at ~18% linear for typical negatives.
     """
-    t *= PRINT_STOPS
+    t *= stops
     np.exp2(t, out=t)
     t -= 1.0
-    t /= _PRINT_SCALE
+    t /= 2.0 ** stops - 1.0
     return t
 
 
@@ -370,15 +411,15 @@ LUT_SIZE = 65536
 def _curves(s: Settings, a: dict, nch: int) -> np.ndarray:
     """Every per-channel step as one lookup table: negative value (0..65535) -> output."""
     x = np.arange(LUT_SIZE, dtype=np.float32) / (LUT_SIZE - 1)
-    v = _t_to_linear(_to_t(np.repeat(x[:, None], nch, axis=1), a))
+    v = _t_to_linear(_to_t(np.repeat(x[:, None], nch, axis=1), a), _stops(nch))
     gains = _gains(s, nch)
     if not np.allclose(gains, 1.0, atol=1e-4):
         v *= gains
     np.maximum(v, 0.0, out=v)
+    k = float(a.get("auto_gain", 1.0)) if s.auto_brightness else 1.0
+    if k > 1.0001:
+        _lift(v, k)
     v **= 1.0 / DISPLAY_GAMMA
-    ag = float(a.get("auto_gamma", 1.0)) if s.auto_brightness else 1.0
-    if abs(ag - 1.0) > 1e-4:
-        v **= 1.0 / ag
 
     b, w = s.black / 200.0, 1.0 - s.white / 200.0
     if b != 0.0 or w != 1.0:

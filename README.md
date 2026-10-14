@@ -76,7 +76,8 @@ each build, and attaches all three downloads to the Release.
 ## Features
 
 - **Automatic inversion.** The orange mask is removed and channels balanced per frame (auto levels + auto white balance).
-- **Auto brightness.** Dark-looking conversions get their midtones and shadows lifted to a normal brightness without clipping; night and low-key frames keep their darkness. Can be switched off per frame.
+- **Auto brightness.** Dim conversions (often caused by a few lamps or reflections setting the white point) are brightened like a gentle exposure push: highlights come up toward white without clipping, blacks stay black and night frames stay dark. Can be switched off per frame.
+- **B&W prints with snap.** Black-and-white film is printed onto a slightly harder virtual paper grade than colour, for deeper blacks and cleaner whites.
 - **Colour and B&W modes, detected automatically.** Each new frame is classified on load. B&W silver puts all three channels on one line in density space, while colour dyes spread out; the orange mask is a second check. Click either button to override. B&W is processed as a single channel and can be exported as true grayscale.
 - **Auto crop.** Finds the picture edges inside the rebate, the gaps between frames and the holder, and straightens tilt up to ±4°.
   It looks for straight, frame-length edges with frame border (clear film, holder or light) beyond them, so straight lines inside the picture, such as horizons, roof lines or a flat sky, aren't mistaken for the frame edge. Works for colour and B&W, 35 mm and medium format, and night scenes.
