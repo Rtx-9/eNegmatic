@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
+from .colorspace import DEFAULT as DEFAULT_SPACE
+from .colorspace import SPACES, convert, icc_profile
 from .core import Settings, apply_crop, apply_geometry, render, resize_long_edge, resolve_analysis
 from .fileio import FORMATS, load_negative, save_image
 
@@ -20,6 +22,7 @@ class ExportOptions:
     suffix: str = ""
     overwrite: bool = False
     bw_grayscale: bool = True   # B&W film -> single-channel file
+    color_space: str = "srgb"   # srgb | p3 | adobe | prophoto (see colorspace.SPACES)
     workers: int = 2
 
     def to_dict(self) -> dict:
@@ -57,9 +60,12 @@ def export_one(src: str, settings: dict, options: dict) -> tuple[str, str | None
         img = render(view, s, a)
         del full, view
         img = resize_long_edge(img, int(o.long_edge))
+        gray = o.bw_grayscale and s.film_type == "bw"
+        space = o.color_space if o.color_space in SPACES else DEFAULT_SPACE
+        img = convert(img, space, grayscale=gray)
         out = output_path(src, o)
         save_image(str(out), img, o.fmt, int(o.bits), int(o.quality),
-                   grayscale=o.bw_grayscale and s.film_type == "bw")
+                   grayscale=gray, icc=icc_profile(space, grayscale=gray))
         return src, str(out), None
     except Exception as e:  # reported back to the UI
         return src, None, f"{type(e).__name__}: {e}"

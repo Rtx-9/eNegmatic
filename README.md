@@ -76,9 +76,11 @@ each build, and attaches all three downloads to the Release.
 ## Features
 
 - **Automatic inversion.** The orange mask is removed and channels balanced per frame (auto levels + auto white balance).
+- **Auto brightness.** Dark-looking conversions get their midtones and shadows lifted to a normal brightness without clipping; night and low-key frames keep their darkness. Can be switched off per frame.
 - **Colour and B&W modes, detected automatically.** Each new frame is classified on load. B&W silver puts all three channels on one line in density space, while colour dyes spread out; the orange mask is a second check. Click either button to override. B&W is processed as a single channel and can be exported as true grayscale.
 - **Auto crop.** Finds the picture edges inside the rebate, the gaps between frames and the holder, and straightens tilt up to ±4°.
-  It looks for straight, frame-length edges with a uniform band outside them, so it works for colour and B&W, 35 mm and medium format, and night scenes.
+  It looks for straight, frame-length edges with frame border (clear film, holder or light) beyond them, so straight lines inside the picture, such as horizons, roof lines or a flat sky, aren't mistaken for the frame edge. Works for colour and B&W, 35 mm and medium format, and night scenes.
+  Straightening traces the frame edges to a fraction of a pixel and balances opposite edges, so frames that aren't perfect rectangles (keystoning, film curl) come out as level as possible.
   New images are auto-cropped when they load (switch this off under *Options*).
 - **Manual crop tool.** Drag handles, rule-of-thirds overlay and aspect locks (3:2, 4:3, 5:4, 1:1, 6×7, 16:9).
   Also: 90° rotate, flip, and fine straightening.
@@ -92,7 +94,8 @@ each build, and attaches all three downloads to the Release.
 - **Copy / Paste / Paste to all** settings between frames.
   The ⋯ button next to Copy chooses which groups get copied: film and inversion, tone, colour, detail, rotation, crop.
   *Lock analysis* freezes one frame's base and levels, so a whole roll converts consistently.
-- **Export** the current, selected or all frames as JPEG, TIFF or PNG (8/16-bit).
+- **Export** the current, selected or all frames as JPEG, TIFF or PNG (8/16-bit), in **sRGB** (default), **Display P3**, **Adobe RGB** (compatible) or **ProPhoto RGB**.
+  Every file gets an embedded ICC profile, so colour-managed apps display it correctly.
   You can resize, add a suffix, and choose the destination; exports run in parallel and can be cancelled.
 - **Collapsible panel sections**, each with its own reset button, remembered between sessions.
 - **Dark / light / system theme** (**Ctrl+T**).

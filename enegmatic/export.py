@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDia
                                QPushButton, QRadioButton, QSpinBox, QVBoxLayout, QWidget)
 
 from .batch import ExportOptions, export_one
+from .colorspace import SPACES
 
 SCOPES = ("current", "selected", "all")
 
@@ -55,6 +56,23 @@ class ExportDialog(QDialog):
         self.bits.setCurrentIndex(1 if o.bits == 16 else 0)
         form.addRow("Bit depth", self.bits)
 
+        self.space = QComboBox()
+        for key, sp in SPACES.items():
+            self.space.addItem(sp.label, key)
+        self.space.setCurrentIndex(max(0, self.space.findData(o.color_space)))
+        self.space.setToolTip("Colour space of the exported files. Each file gets a matching\n"
+                              "embedded ICC profile, so colour-managed apps show it correctly.")
+        self.space_hint = QLabel()
+        self.space_hint.setObjectName("Muted")
+        self.space_hint.setWordWrap(True)
+        space_box = QWidget()
+        sv = QVBoxLayout(space_box)
+        sv.setContentsMargins(0, 0, 0, 0)
+        sv.setSpacing(3)
+        sv.addWidget(self.space)
+        sv.addWidget(self.space_hint)
+        form.addRow("Colour space", space_box)
+
         self.quality = QSpinBox()
         self.quality.setRange(50, 100)
         self.quality.setValue(int(o.quality))
@@ -82,8 +100,8 @@ class ExportDialog(QDialog):
         form.addRow("Destination", w)
 
         self.out_dir = QLineEdit(o.out_dir)
-        self.out_dir.setPlaceholderText("Choose a folderâ€¦")
-        browse = QPushButton("Browseâ€¦")
+        self.out_dir.setPlaceholderText("Choose a folder…")
+        browse = QPushButton("Browse…")
         browse.clicked.connect(self._browse)
         row2 = QHBoxLayout()
         row2.setContentsMargins(0, 0, 0, 0)
@@ -108,7 +126,7 @@ class ExportDialog(QDialog):
         self.workers = QSpinBox()
         self.workers.setRange(1, max(1, os.cpu_count() or 1))
         self.workers.setValue(min(int(o.workers), self.workers.maximum()))
-        self.workers.setToolTip("Images processed in parallel. Each needs ~1â€“2 GB RAM for large raws.")
+        self.workers.setToolTip("Images processed in parallel. Each needs ~1–2 GB RAM for large raws.")
         form.addRow("Parallel jobs", self.workers)
 
         root.addLayout(form)
@@ -126,6 +144,8 @@ class ExportDialog(QDialog):
 
         self.fmt.currentIndexChanged.connect(self._sync)
         self.subfolder_cb.toggled.connect(self._sync)
+        self.space.currentIndexChanged.connect(self._sync)
+        self.bits.currentIndexChanged.connect(self._sync)
         self._sync()
 
     def _sync(self):
@@ -134,6 +154,11 @@ class ExportDialog(QDialog):
         self.bits.setEnabled(not is_jpeg)
         if is_jpeg:
             self.bits.setCurrentIndex(0)
+        key = self.space.currentData()
+        hint = SPACES[key].hint
+        if key == "prophoto" and (is_jpeg or self.bits.currentData() == 8):
+            hint += "  ⚠ 8-bit is too coarse for ProPhoto and can cause banding."
+        self.space_hint.setText(hint)
         sub = self.subfolder_cb.isChecked()
         self.subfolder.setEnabled(sub)
         self._dir_row.setEnabled(not sub)
@@ -158,7 +183,7 @@ class ExportDialog(QDialog):
             subfolder=self.subfolder.text().strip() or "positives",
             out_dir=self.out_dir.text().strip(), suffix=self.suffix.text(),
             overwrite=self.overwrite.isChecked(), bw_grayscale=self.gray.isChecked(),
-            workers=self.workers.value(),
+            color_space=self.space.currentData(), workers=self.workers.value(),
         )
         return o, SCOPES[max(0, self._scope.checkedId())]
 

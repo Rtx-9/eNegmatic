@@ -111,26 +111,37 @@ def load_proxy(path: str) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
 
 
 def save_image(path: str, img: np.ndarray, fmt: str, bits: int = 8, quality: int = 95,
-               grayscale: bool = False) -> None:
-    """Save a float RGB image in [0, 1] (unicode-safe)."""
+               grayscale: bool = False, icc: bytes | None = None) -> None:
+    """Save a float RGB image in [0, 1] (unicode-safe), embedding the ICC profile if given."""
     if fmt == "jpeg":
         bits = 8
     if bits == 16:
-        arr = (img * 65535.0 + 0.5).astype(np.uint16)
+        arr = (np.clip(img, 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16)
     else:
-        arr = (img * 255.0 + 0.5).astype(np.uint8)
-    arr = np.ascontiguousarray(arr[..., 0] if grayscale else arr[..., ::-1])
+        arr = (np.clip(img, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+    if grayscale:
+        arr = np.ascontiguousarray(arr[..., 0])
+    if fmt == "tiff":
+        import tifffile    # writes the ICC profile tag; Adobe Deflate compression
+        tifffile.imwrite(path, arr, photometric="minisblack" if grayscale else "rgb",
+                         compression="zlib", iccprofile=icc)
+        return
+    if not grayscale:
+        arr = np.ascontiguousarray(arr[..., ::-1])    # OpenCV wants BGR
     ext = FORMATS[fmt][0]
     if fmt == "jpeg":
         params = [cv2.IMWRITE_JPEG_QUALITY, int(quality)]
-    elif fmt == "png":
-        params = [cv2.IMWRITE_PNG_COMPRESSION, 3]
     else:
-        params = [cv2.IMWRITE_TIFF_COMPRESSION, 5]  # LZW
+        params = [cv2.IMWRITE_PNG_COMPRESSION, 3]
     ok, buf = cv2.imencode(ext, arr, params)
     if not ok:
         raise IOError(f"Could not encode {Path(path).name}")
-    buf.tofile(path)
+    data = buf.tobytes()
+    if icc:
+        from .colorspace import embed_jpeg, embed_png
+        data = embed_jpeg(data, icc) if fmt == "jpeg" else embed_png(data, icc)
+    with open(path, "wb") as f:
+        f.write(data)
 
 
 def _read_sidecar(p: Path) -> dict:

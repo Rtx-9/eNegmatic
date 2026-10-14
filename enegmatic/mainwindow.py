@@ -635,6 +635,11 @@ class MainWindow(QMainWindow):
         self.cb_auto_wb.setToolTip("Grey-balance the mid-tones after removing the orange mask.")
         self.cb_auto_wb.toggled.connect(lambda on: self._set_field("auto_wb", on))
         sec.addWidget(self.cb_auto_wb)
+        self.cb_auto_bright = QCheckBox("Auto brightness")
+        self.cb_auto_bright.setToolTip("Lift midtones and shadows of dark-looking conversions to a normal\n"
+                                       "brightness. Night and low-key frames keep their darkness.")
+        self.cb_auto_bright.toggled.connect(lambda on: self._set_field("auto_brightness", on))
+        sec.addWidget(self.cb_auto_bright)
         lock_row = QHBoxLayout()
         self.cb_lock = QCheckBox("Lock analysis (roll)")
         self.cb_lock.setToolTip(
@@ -1045,7 +1050,8 @@ class MainWindow(QMainWindow):
             w.blockSignals(True)
             w.setChecked(on)
             w.blockSignals(False)
-        for cb, on in ((self.cb_auto_wb, s.auto_wb), (self.cb_lock, s.lock_analysis)):
+        for cb, on in ((self.cb_auto_wb, s.auto_wb), (self.cb_auto_bright, s.auto_brightness),
+                       (self.cb_lock, s.lock_analysis)):
             cb.blockSignals(True)
             cb.setChecked(bool(on))
             cb.blockSignals(False)

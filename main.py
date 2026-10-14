@@ -31,12 +31,15 @@ def selftest(src: str, out_dir: str) -> int:
     g = apply_geometry(proxy, s)
     s.film_type = detect_film_type(g)
     save_image(str(out / "preview.png"), render(g, s, analyze(g, s)), "png")
-    opts = ExportOptions(fmt="jpeg", use_subfolder=False, out_dir=str(out), overwrite=True)
+    jobs = [ExportOptions(fmt="jpeg", use_subfolder=False, out_dir=str(out), overwrite=True),
+            ExportOptions(fmt="tiff", bits=16, color_space="prophoto", suffix="_prophoto",
+                          use_subfolder=False, out_dir=str(out), overwrite=True)]
     with ProcessPoolExecutor(max_workers=1) as pool:
-        _, written, err = pool.submit(export_one, src, s.to_dict(), opts.to_dict()).result()
-    (out / "selftest.txt").write_text(
-        f"film={s.film_type} angle={angle} crop={crop}\nexport={written}\nerror={err}\n", encoding="utf-8")
-    return 0 if written and not err else 1
+        results = [pool.submit(export_one, src, s.to_dict(), o.to_dict()).result() for o in jobs]
+    lines = [f"film={s.film_type} angle={angle} crop={crop}"]
+    lines += [f"export={written} error={err}" for _, written, err in results]
+    (out / "selftest.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return 0 if all(written and not err for _, written, err in results) else 1
 
 
 def main():

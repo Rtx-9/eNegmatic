@@ -29,11 +29,12 @@ LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
 # Fields that change which pixels / statistics the auto analysis looks at.
 ANALYSIS_FIELDS = ("film_type", "rotation", "flip_h", "straighten", "crop",
-                   "clip_black", "clip_white", "base_rgb", "auto_wb")
+                   "clip_black", "clip_white", "base_rgb", "auto_wb", "auto_brightness")
 # Groups used by selective copy / paste and the per-section reset buttons.
 SETTING_GROUPS = {
     "film": ("Film type & inversion",
-             ("film_type", "clip_black", "clip_white", "base_rgb", "auto_wb", "lock_analysis", "analysis")),
+             ("film_type", "clip_black", "clip_white", "base_rgb", "auto_wb", "auto_brightness",
+              "lock_analysis", "analysis")),
     "tone": ("Tone", ("exposure", "contrast", "gamma", "black", "white", "highlights", "shadows")),
     "color": ("Colour & white balance", ("wb_gains", "temperature", "tint", "saturation")),
     "detail": ("Detail", ("sharpen",)),
@@ -56,6 +57,7 @@ class Settings:
     clip_white: float = 0.05            # % of pixels auto levels may clip to white
     base_rgb: list | None = None        # picked film-base colour (linear negative)
     auto_wb: bool = True                # mid-tone grey balance after inversion
+    auto_brightness: bool = True        # lift dark-looking conversions to a normal brightness
     lock_analysis: bool = False         # keep the current analysis (roll-consistent)
     analysis: dict | None = None
     # colour
@@ -224,9 +226,14 @@ def detect_film_type(neg_cropped: np.ndarray) -> str:
     spread = float(np.sqrt(max(ev[1], 0.0) / max(ev[2], 1e-12)))
     if spread >= 0.10:
         return "color"
-    thin = px[keep][lum[keep] <= np.percentile(lum[keep], 5)]       # brightest = nearest the base
+    # Orange mask: blue < green < red in the clearest areas (nearest the film base).
+    # Log ratios, so gamma-encoded scans (which squeeze ratios toward 1) still register.
+    thin = px[keep][lum[keep] <= np.percentile(lum[keep], 5)]
     base = np.median(thin, axis=0) + 1e-6
-    if base[2] / base[1] < 0.65 and base[0] / base[1] > 1.4:
+    g_over_b, r_over_g = float(np.log(base[1] / base[2])), float(np.log(base[0] / base[1]))
+    if spread >= 0.05 and g_over_b > 0.2 and r_over_g > 0.15:
+        return "color"
+    if g_over_b > 0.45 and r_over_g > 0.3:          # unmistakable mask, colourless scene
         return "color"
     return "bw"
 
@@ -274,8 +281,34 @@ def analyze(neg: np.ndarray, s: Settings) -> dict:
         "dmin": [float(v) for v in dmin],
         "dmax": [float(v) for v in dmax],
         "wb_gamma": [float(v) for v in wb_gamma],
+        "auto_gamma": _auto_gamma(d, dmin, dmax, wb_gamma) if s.auto_brightness else 1.0,
         "key": analysis_key(s),
     }
+
+
+BRIGHTNESS_TARGET = 0.42   # median display brightness of a normally exposed photo
+
+
+def _auto_gamma(d: np.ndarray, dmin, dmax, wb_gamma) -> float:
+    """Midtone lift that brings the conversion's median brightness toward a normal photo.
+
+    Applied as a gamma on the display values, so black and white points (and therefore
+    clipping) stay where auto levels put them; only midtones and shadows move. Frames that
+    are mostly genuinely dark (night, low-key) keep their darkness, and bright frames are
+    never darkened.
+    """
+    t = np.clip((d - dmin) / (dmax - dmin), 0.0, 1.5).astype(np.float32)
+    t **= np.asarray(wb_gamma, np.float32)
+    v = np.maximum(_t_to_linear(t), 0.0) ** (1.0 / DISPLAY_GAMMA)
+    y = v @ LUMA if v.shape[1] == 3 else v[:, 0]
+    med, p75 = (float(x) for x in np.percentile(y, [50, 75]))
+    if med >= BRIGHTNESS_TARGET:
+        return 1.0
+    g = np.log(max(med, 0.02)) / np.log(BRIGHTNESS_TARGET)
+    # Low-key protection: when three quarters of the frame is near black (night scenes,
+    # dark backgrounds) the darkness is the picture, so fade the lift out.
+    strength = 0.8 * float(np.clip((p75 - 0.12) / 0.12, 0.0, 1.0))
+    return float(min(1.0 + (g - 1.0) * strength, 1.8))
 
 
 def analysis_valid(a: dict | None, s: Settings) -> bool:
@@ -343,6 +376,9 @@ def _curves(s: Settings, a: dict, nch: int) -> np.ndarray:
         v *= gains
     np.maximum(v, 0.0, out=v)
     v **= 1.0 / DISPLAY_GAMMA
+    ag = float(a.get("auto_gamma", 1.0)) if s.auto_brightness else 1.0
+    if abs(ag - 1.0) > 1e-4:
+        v **= 1.0 / ag
 
     b, w = s.black / 200.0, 1.0 - s.white / 200.0
     if b != 0.0 or w != 1.0:
