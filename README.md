@@ -83,7 +83,8 @@ each build, and attaches all three downloads to the Release.
 - **Auto crop.** Finds the picture edges inside the rebate, the gaps between frames and the holder, and straightens tilt up to ±4°.
   It looks for straight, frame-length edges with frame border (clear film, holder or light) beyond them, so straight lines inside the picture, such as horizons, roof lines or a flat sky, aren't mistaken for the frame edge. Works for colour and B&W, 35 mm and medium format, and night scenes.
   Straightening traces the frame edges to a fraction of a pixel and balances opposite edges, so frames that aren't perfect rectangles (keystoning, film curl) come out as level as possible.
-  It also recognises the format (3:2, 4:3, 5:4, 1:1, 6×7, 16:9, 65:24; 3:2 when unsure) and crops to it exactly.
+  It trims strips of unexposed film between the picture and the holder, recognises the format
+  (3:2, 4:3, 5:4, 1:1, 6×7, 16:9, 65:24; 3:2 when unsure) and crops to it exactly.
   New images are auto-cropped when they load (switch this off under *Options*).
 - **Manual crop tool.** Drag handles, rule-of-thirds overlay and aspect locks; each frame remembers its format.
   Drag just outside a corner to rotate. Straightening turns the picture about the crop centre and trims the crop
@@ -95,7 +96,10 @@ each build, and attaches all three downloads to the Release.
   Double-click any slider to reset it. Every edit can be undone (Ctrl+Z) and redone (Ctrl+Shift+Z / Ctrl+Y).
 - **Zoom.** Click the image to toggle fit and 1:1, or use mouse wheel or touchpad pinch to zoom; drag or two-finger scroll to pan.
   Past the preview's resolution, the full-resolution raw is decoded in the background and only the visible area is rendered sharply.
-- **Live histogram** and a *Negative* toggle (**B**) for before/after.
+- **Live waveform** (left to right follows the image, height is brightness, RGB overlaid; clipping shows on the
+  top and bottom lines) and a *Negative* toggle (**B**) for before/after.
+- **Clip to black / white.** Turn a chosen share of the picture pure black or white on top of the automatic
+  levels (0 % = the automatic result); brightness only, so colours don't shift.
 - **Copy / Paste / Paste to all** settings between frames.
   The ⋯ button next to Copy chooses which groups get copied: film and inversion, tone, colour, detail, rotation, crop.
   *Lock analysis* freezes one frame's base and levels, so a whole roll converts consistently.

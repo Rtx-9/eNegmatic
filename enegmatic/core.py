@@ -55,8 +55,8 @@ class Settings:
     crop: list | None = None            # normalised [x0, y0, x1, y1] after rotation
     crop_aspect: str = ""               # crop tool aspect, a key of ASPECTS ("" = free)
     # inversion / analysis
-    clip_black: float = 0.05            # % of pixels auto levels may clip to black
-    clip_white: float = 0.05            # % of pixels auto levels may clip to white
+    clip_black: float = 0.0             # % of the picture pushed to pure black (beyond auto levels)
+    clip_white: float = 0.0             # % of the picture pushed to pure white
     base_rgb: list | None = None        # picked film-base colour (linear negative)
     auto_wb: bool = True                # mid-tone grey balance after inversion
     auto_brightness: bool = True        # lift dark-looking conversions to a normal brightness
@@ -250,7 +250,7 @@ def view_scale(src_shape, s: Settings, full_view: bool = False) -> float:
 ASPECTS = {"3:2": 3 / 2, "4:3": 4 / 3, "5:4": 5 / 4, "1:1": 1.0, "6×7": 7 / 6, "16:9": 16 / 9,
            "65:24": 65 / 24}
 DEFAULT_ASPECT = "3:2"       # 35 mm, the usual case when the format isn't recognised
-ASPECT_TOLERANCE = 0.04      # how close (log ratio) a detected frame must be to a format
+ASPECT_TOLERANCE = 0.025     # how close (log ratio) a detected frame must be to another format
 
 
 def crop_px(crop, frame_wh):
@@ -265,6 +265,8 @@ def detect_aspect(crop, frame_wh) -> str:
     w, h = max(x1 - x0, 1e-6), max(y1 - y0, 1e-6)
     r = max(w, h) / min(w, h)
     name = min(ASPECTS, key=lambda k: abs(math.log(r / ASPECTS[k])))
+    # Anything but 3:2 needs a close match: a frame detected a little too wide (clear
+    # film at one end) must not turn into 16:9, or a slightly short one into 4:3.
     return name if abs(math.log(r / ASPECTS[name])) <= ASPECT_TOLERANCE else DEFAULT_ASPECT
 
 
@@ -408,12 +410,14 @@ def analyze(neg: np.ndarray, s: Settings) -> dict:
     step = max(1, int(math.sqrt(sub.shape[0] * sub.shape[1] / 120_000)))
     d = density(as_float(sub[::step, ::step]).reshape(-1, nch))
 
+    # Per-channel levels remove the orange mask and balance the channels; they always
+    # use a tiny fixed clip. The user's clip sliders act afterwards on brightness only.
     if s.base_rgb:
         base = to_working(np.asarray(s.base_rgb, np.float32).reshape(1, 1, 3), s.film_type)
         dmin = density(base.reshape(-1))
     else:
-        dmin = np.percentile(d, float(s.clip_black), axis=0)
-    dmax = np.percentile(d, 100.0 - float(s.clip_white), axis=0)
+        dmin = np.percentile(d, AUTO_CLIP, axis=0)
+    dmax = np.percentile(d, 100.0 - AUTO_CLIP, axis=0)
     dmax = np.maximum(dmax, dmin + 0.05)
 
     wb_gamma = np.ones(nch)
@@ -434,13 +438,46 @@ def analyze(neg: np.ndarray, s: Settings) -> dict:
                 target = float(np.exp(np.mean(np.log(med))))
                 wb_gamma = np.clip(np.log(target) / np.log(med), 0.5, 2.0)
 
+    gain = _auto_gain(d, dmin, dmax, wb_gamma) if s.auto_brightness else 1.0
+    v_black, v_white = _clip_points(d, dmin, dmax, wb_gamma, gain, s.clip_black, s.clip_white)
     return {
         "dmin": [float(v) for v in dmin],
         "dmax": [float(v) for v in dmax],
         "wb_gamma": [float(v) for v in wb_gamma],
-        "auto_gain": _auto_gain(d, dmin, dmax, wb_gamma) if s.auto_brightness else 1.0,
+        "auto_gain": gain,
+        "v_black": v_black,
+        "v_white": v_white,
         "key": analysis_key(s),
     }
+
+
+AUTO_CLIP = 0.05       # % per channel that the automatic levels ignore (dust, specular glints)
+
+
+def _brightness_t(d, dmin, dmax, wb_gamma) -> np.ndarray:
+    """Normalised, grey-balanced density of each sample."""
+    t = np.clip((d - dmin) / (dmax - dmin), 0.0, 1.5).astype(np.float32)
+    return _balance(t, wb_gamma)
+
+
+def _clip_points(d, dmin, dmax, wb_gamma, gain, clip_black, clip_white) -> tuple[float, float]:
+    """Display-level black / white points that turn the requested share of the picture
+    pure black / white. They apply after auto levels and auto brightness and before the
+    tone sliders, and move all channels together, so colours don't shift."""
+    cb, cw = float(clip_black or 0.0), float(clip_white or 0.0)
+    if cb <= 0.0 and cw <= 0.0:
+        return 0.0, 1.0
+    t = _brightness_t(d, dmin, dmax, wb_gamma)
+    v = np.maximum(_t_to_linear(t, _stops(t.shape[1])), 0.0)
+    if gain > 1.0001:
+        _lift(v, gain)
+    v = np.minimum(v, 1.0) ** (1.0 / DISPLAY_GAMMA)
+    y = v @ LUMA if v.shape[1] == 3 else v[:, 0]
+    vb = float(np.percentile(y, min(cb, 50.0))) if cb > 0 else 0.0
+    vw = float(np.percentile(y, 100.0 - min(cw, 50.0))) if cw > 0 else 1.0
+    if vw - vb < 0.05:
+        vw = vb + 0.05
+    return round(vb, 5), round(vw, 5)
 
 
 AUTO_WHITE = 0.79      # linear level (display ~0.90) the brightest real content is lifted to
@@ -458,8 +495,8 @@ def _auto_gain(d: np.ndarray, dmin, dmax, wb_gamma) -> float:
     stay dark. It is applied by _lift: a plain gain near black (blacks stay
     black, no colour shifts, night stays night) that rolls off so nothing clips.
     """
-    t = np.clip((d - dmin) / (dmax - dmin), 0.0, 1.5).astype(np.float32)
-    lin = np.maximum(_t_to_linear(_balance(t, wb_gamma), _stops(t.shape[1])), 0.0)
+    t = _brightness_t(d, dmin, dmax, wb_gamma)
+    lin = np.maximum(_t_to_linear(t, _stops(t.shape[1])), 0.0)
     y = lin @ LUMA if lin.shape[1] == 3 else lin[:, 0]
     med, hi = (float(x) for x in np.percentile(y, [50, 99]))
 
@@ -486,8 +523,8 @@ def analysis_valid(a: dict | None, s: Settings) -> bool:
     nch = 1 if s.film_type == "bw" else 3
     if len(a["dmin"]) != nch:
         return False
-    if s.auto_brightness and "auto_gain" not in a and not s.lock_analysis:
-        return False                    # saved by an older version (1.1.1 used auto_gamma)
+    if not s.lock_analysis and ("v_black" not in a or (s.auto_brightness and "auto_gain" not in a)):
+        return False                    # saved by an older version
     return bool(s.lock_analysis or a.get("key") == analysis_key(s))
 
 
@@ -577,6 +614,10 @@ def _curves(s: Settings, a: dict, nch: int) -> np.ndarray:
     if k > 1.0001:
         _lift(v, k)
     v **= 1.0 / DISPLAY_GAMMA
+    vb, vw = float(a.get("v_black", 0.0)), float(a.get("v_white", 1.0))
+    if vb != 0.0 or vw != 1.0:                          # Clip to black / white sliders
+        v -= vb
+        v /= max(vw - vb, 0.05)
 
     b, w = -s.black / 200.0, 1.0 - s.white / 200.0     # Blacks + lifts, - deepens
     if b != 0.0 or w != 1.0:
@@ -736,6 +777,28 @@ def to_uint8(img: np.ndarray) -> np.ndarray:
 
 def to_uint16(img: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray((img * 65535.0 + 0.5).astype(np.uint16))
+
+
+WAVE_COLS, WAVE_LEVELS = 256, 128
+
+
+def waveform(img8: np.ndarray, mono: bool = False) -> np.ndarray:
+    """Waveform monitor data: for each of WAVE_COLS image columns, how many pixels sit
+    at each of WAVE_LEVELS brightness levels; per channel (R, G, B) or luminance only.
+    Shape (channels, WAVE_LEVELS, WAVE_COLS), level 0 = black."""
+    h, w = img8.shape[:2]
+    step = max(1, int(math.sqrt(h * w / 300_000)))
+    sub = img8[::step, ::step]
+    sh, sw = sub.shape[:2]
+    col = (np.arange(sw) * WAVE_COLS // max(sw, 1)).astype(np.int64)
+    col = np.broadcast_to(col, (sh, sw)).ravel()
+    planes = [(sub.astype(np.float32) @ LUMA).astype(np.uint8)] if mono else [sub[..., c] for c in range(3)]
+    out = np.empty((len(planes), WAVE_LEVELS, WAVE_COLS), np.float32)
+    for i, plane in enumerate(planes):
+        lvl = (plane.ravel().astype(np.int64) * WAVE_LEVELS) >> 8
+        out[i] = np.bincount(lvl * WAVE_COLS + col, minlength=WAVE_LEVELS * WAVE_COLS) \
+            .reshape(WAVE_LEVELS, WAVE_COLS)
+    return out
 
 
 def histogram(img8: np.ndarray) -> np.ndarray:

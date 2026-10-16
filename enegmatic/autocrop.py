@@ -382,3 +382,65 @@ def detect_frame(neg: np.ndarray, inset: float = 0.01, max_angle: float = 4.0):
         return 0.0, None
     crop = [x0 + inset * cw, y0 + inset * ch, x1 - inset * cw, y1 - inset * ch]
     return round(angle, 3), [round(min(max(c, 0.0), 1.0), 5) for c in crop]
+
+
+
+STRIP_MAX = 0.06        # widest unexposed strip removed, fraction of the crop
+STRIP_LEVEL = 0.07      # strip density above the film base (unexposed film + fog)
+STRIP_FLAT = 0.05       # spread (p90 - p10) across a strip line: plain film, no picture
+STRIP_RISE = 0.03       # sustained density rise that marks the start of the picture
+
+
+def trim_unexposed(neg: np.ndarray, angle: float, crop) -> list:
+    """Remove strips of unexposed film between the picture and the detected border.
+
+    Many cameras leave a narrow strip of clear film at the ends of the frame, and the
+    frame search stops at the holder beyond it. The strip is film base all the way
+    across, so a line of it is uniformly at base density; the picture starts where the
+    density rises above that for good. Where the picture next to the strip is itself
+    as thin as the base (black night sky), nothing is removed.
+    """
+    d = _density(neg, EDGE_SIZE)
+    if angle:
+        d = _rotate(d, angle)
+    h, w = d.shape
+    lv = _levels(d)
+    box = [crop[0] * w, crop[1] * h, crop[2] * w, crop[3] * h]
+
+    def strip(D, lo, hi, a, b, inward):
+        """Width of the unexposed strip at line `lo` (inward +1) or `hi` (-1)."""
+        ra, rb = int(a + 0.1 * (b - a)), int(b - 0.1 * (b - a))
+        if rb - ra < 10:
+            return 0
+        start = int(round(lo)) if inward > 0 else int(round(hi)) - 1
+        limit = int(STRIP_MAX * (hi - lo))
+        idx = [start + inward * k for k in range(limit + 8)]
+        idx = [i for i in idx if 0 <= i < D.shape[1]]
+        if len(idx) < 12:
+            return 0
+        lines = D[ra:rb, idx]
+        p10, p90 = np.percentile(lines, [10, 90], axis=0)
+        above = p90 - lv.base
+        flat = (above <= STRIP_LEVEL) & (p90 - p10 <= STRIP_FLAT)
+        k = 0
+        while k < 6 and k < len(idx) and not flat[k]:   # the edge itself is blurred
+            k += 1
+        first = k
+        while k < len(idx) and flat[k]:
+            k += 1
+        if k - first < 4 or k > limit:                  # no strip, or strip runs on (dark picture)
+            return 0
+        level = float(np.median(above[first:k]))
+        after = above[k + 2:k + 8]                      # past the soft picture edge
+        if len(after) < 4 or float(np.min(after)) < level + STRIP_RISE:
+            return 0
+        return k + 1
+
+    x0, y0, x1, y1 = box
+    l_ = strip(d, x0, x1, y0, y1, +1)
+    r_ = strip(d, x0, x1, y0, y1, -1)
+    dT = np.ascontiguousarray(d.T)
+    t_ = strip(dT, y0, y1, x0, x1, +1)
+    b_ = strip(dT, y0, y1, x0, x1, -1)
+    x0, x1, y0, y1 = x0 + l_, x1 - r_, y0 + t_, y1 - b_
+    return [round(float(v), 6) for v in (x0 / w, y0 / h, x1 / w, y1 / h)]

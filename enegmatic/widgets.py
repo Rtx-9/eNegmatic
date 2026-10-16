@@ -299,23 +299,54 @@ class ParamSlider(QWidget):
             self.setValue(self._default)
             self.valueChanged.emit(self._default)
 
-class Histogram(QWidget):
+class Waveform(QWidget):
+    """Waveform monitor: x = position across the image, y = brightness, intensity = how
+    many pixels of that column sit at that brightness. RGB overlaid (white where the
+    channels agree), or a single trace for B&W. Clipping shows as a line on the 0 % /
+    100 % rails."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(84)
+        self.setMinimumHeight(118)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._hist: np.ndarray | None = None
+        self._data: np.ndarray | None = None
         self._mono = False
+        self._img: QImage | None = None
         self.bg = QColor("#25282d")
         self.grid = QColor("#30343b")
+        self.setToolTip("Waveform: left to right matches the image; height is brightness\n"
+                        "(bottom = black, top = white). Traces on the edges mean clipping.")
 
     def set_colors(self, bg: str, grid: str):
         self.bg, self.grid = QColor(bg), QColor(grid)
+        self._build()
         self.update()
 
-    def set_data(self, hist: np.ndarray | None, mono: bool = False):
-        self._hist, self._mono = hist, mono
+    def set_data(self, data: np.ndarray | None, mono: bool = False):
+        self._data, self._mono = data, mono
+        self._build()
         self.update()
+
+    def _build(self):
+        if self._data is None:
+            self._img = None
+            return
+        d = self._data[:1] if self._mono else self._data
+        top = float(np.percentile(d[d > 0], 99.7)) if np.any(d > 0) else 1.0
+        inten = np.clip((d / max(top, 1e-6)) ** 0.6, 0.0, 1.0)[:, ::-1, :]     # level 0 at the bottom
+        bg = np.array([self.bg.red(), self.bg.green(), self.bg.blue()], np.float32)
+        dark = self.bg.lightness() < 128
+        if self._mono:
+            ink = np.array([235, 235, 235] if dark else [40, 40, 40], np.float32)
+            rgb = bg + inten[0][..., None] * (ink - bg) * 0.95
+        elif dark:                      # additive: red + green + blue traces add up to white
+            rgb = bg + np.stack([inten[0] * 255, inten[1] * 235, inten[2] * 255], axis=-1) * 0.8
+        else:                           # light theme: subtractive inks on paper
+            rgb = bg - np.stack([(inten[1] + inten[2]) * 0.5 * bg[0], (inten[0] + inten[2]) * 0.5 * bg[1],
+                                 (inten[0] + inten[1]) * 0.5 * bg[2]], axis=-1) * 0.95
+        arr = np.ascontiguousarray(np.clip(rgb, 0, 255).astype(np.uint8))
+        h, w = arr.shape[:2]
+        self._img = QImage(arr.data, w, h, 3 * w, QImage.Format_RGB888).copy()
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -325,35 +356,18 @@ class Histogram(QWidget):
         path.addRoundedRect(r, 8, 8)
         p.fillPath(path, self.bg)
         p.setClipPath(path)
-        p.setPen(QPen(self.grid, 1))
-        for i in (1, 2, 3):
-            x = r.left() + r.width() * i / 4
-            p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
-        if self._hist is None:
-            return
-        h = np.sqrt(self._hist[:1] if self._mono else self._hist)
-        inner = h[:, 2:-2]
-        top = float(np.percentile(inner, 99.5)) if inner.size else 1.0
-        top = max(top, 1e-6) * 1.08
-        colors = ([QColor(200, 200, 200, 150)] if self._mono else
-                  [QColor(235, 70, 70, 110), QColor(70, 200, 90, 110), QColor(70, 130, 245, 110)])
-        mode = QPainter.CompositionMode_Plus if self.bg.lightness() < 128 else QPainter.CompositionMode_Multiply
-        if not self._mono:
-            p.setCompositionMode(mode)
-        w, hh = r.width(), r.height() - 4
-        for ch, col in zip(h, colors):
-            poly = QPolygonF()
-            poly.append(QPointF(r.left(), r.bottom()))
-            for i, v in enumerate(ch):
-                poly.append(QPointF(r.left() + w * i / 255.0, r.bottom() - min(v / top, 1.0) * hh))
-            poly.append(QPointF(r.right(), r.bottom()))
-            if self.bg.lightness() >= 128 and not self._mono:
-                col = QColor(col.red(), col.green(), col.blue(), 90)
-            elif self.bg.lightness() >= 128:
-                col = QColor(90, 90, 90, 130)
-            p.setPen(Qt.NoPen)
-            p.setBrush(col)
-            p.drawPolygon(poly)
+        inner = r.adjusted(4, 5, -4, -5)
+        if self._img is not None:
+            p.setRenderHint(QPainter.SmoothPixmapTransform)
+            p.drawImage(inner, self._img)
+        pen = QPen(self.grid, 1, Qt.DashLine)
+        p.setPen(pen)
+        for i in (0, 1, 2, 3, 4):
+            y = inner.bottom() - inner.height() * i / 4
+            p.drawLine(QPointF(inner.left(), y), QPointF(inner.right(), y))
+
+
+Histogram = Waveform        # former name
 
 
 class ImageView(QWidget):

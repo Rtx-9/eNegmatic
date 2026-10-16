@@ -21,18 +21,18 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QSplitter, QToolBar, QVBoxLayout, QWidget)
 
 from . import __version__, dust
-from .autocrop import detect_frame
+from .autocrop import detect_frame, trim_unexposed
 from .batch import ExportOptions
 from .core import ASPECTS as CROP_ASPECTS
 from .core import (DEFAULT_COPY_GROUPS, SETTING_GROUPS, Settings, detect_aspect, fit_aspect, oriented_ratio,
-                   straighten_crop, detect_film_type, apply_crop, apply_geometry, histogram, negative_preview,
+                   straighten_crop, detect_film_type, apply_crop, apply_geometry, negative_preview, waveform,
                    neutral_wb_gains, orient, render, resolve_analysis, sample, src_to_view, straighten,
                    to_uint8, transform_crop, view_scale, view_to_src)
 from .export import ExportDialog, ExportRunner
 from .fileio import (RAW_EXTS, SUPPORTED_EXTS, collect_files, load_negative_u16, load_proxy, load_sidecar,
                      save_sidecar)
 from .theme import apply_theme, system_theme
-from .widgets import CollapsibleSection, Histogram, ImageView, ParamSlider, glyph_icon, set_slider_colors
+from .widgets import CollapsibleSection, ImageView, ParamSlider, Waveform, glyph_icon, set_slider_colors
 
 THUMB_SIZE = QSize(176, 118)
 
@@ -58,10 +58,12 @@ DETAIL_SLIDERS = [
      "Visible when zoomed in and in full-resolution exports."),
 ]
 FILM_SLIDERS = [
-    ("clip_black", "Black clip %", 0.0, 2.0, 0.01, 2,
-     "How many pixels auto levels may clip to black. Higher = punchier, lower = safer."),
-    ("clip_white", "White clip %", 0.0, 2.0, 0.01, 2,
-     "How many pixels auto levels may clip to white."),
+    ("clip_black", "Clip to black %", 0.0, 5.0, 0.05, 2,
+     "Share of the picture turned pure black, on top of the automatic levels.\n"
+     "0 = only the automatic result. Watch the bottom edge of the waveform."),
+    ("clip_white", "Clip to white %", 0.0, 5.0, 0.05, 2,
+     "Share of the picture turned pure white, on top of the automatic levels.\n"
+     "0 = only the automatic result. Watch the top edge of the waveform."),
 ]
 DUST_SLIDERS = [
     ("dust_strength", "Sensitivity", 0, 100, 1, 0,
@@ -230,7 +232,7 @@ class RenderJob(QRunnable):
             img8 = to_uint8(img)
             mono = s.film_type == "bw" and not self.negative
             self.signals.rendered.emit(self.gen, self.path, np_to_qimage(img8), a,
-                                       histogram(img8), mono)
+                                       waveform(img8, mono), mono)
         except Exception as e:
             self.signals.failed.emit(self.path, f"Render error: {type(e).__name__}: {e}")
 
@@ -653,7 +655,7 @@ class MainWindow(QMainWindow):
         hv = QVBoxLayout(hist_card)
         hv.setContentsMargins(10, 10, 10, 8)
         hv.setSpacing(6)
-        self.hist = Histogram()
+        self.hist = Waveform()
         hv.addWidget(self.hist)
         self.info = QLabel(" ")
         self.info.setObjectName("Muted")
@@ -1409,6 +1411,7 @@ class MainWindow(QMainWindow):
     def _apply_autocrop(s: Settings, proxy: ProxyData, angle, crop):
         """Use a detected frame: recognise its format (3:2 if unsure) and crop to it exactly."""
         wh = proxy.frame_size(s)
+        crop = trim_unexposed(orient(proxy.neg, s.rotation, s.flip_h), angle, crop)
         s.crop_aspect = detect_aspect(crop, wh)
         s.straighten = angle
         s.crop = fit_aspect(crop, wh, oriented_ratio(s.crop_aspect, crop, wh))
